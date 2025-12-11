@@ -1,0 +1,26 @@
+[project]
+name = "DeepRank-Ab"
+version = "0.1.0"
+description = "Scoring function for antibody-antigen interactions"
+authors = [{ name = "Xiaotong Xu" }, { email = "x.xu1@uu.nl" }]
+maintainers = [{ name = "BonvinLab" }, { email = "bonvinlab.support@uu.nl" }]
+readme = "README.md"
+license = { file = "LICENSE" }
+classifiers = [
+  'Development Status :: 5 - Production/Stable',
+  'Intended Audience :: Developers',
+  'Intended Audience :: Science/Research',
+  'License :: OSI Approved :: Apache Software License',
+  'Topic :: Scientific/Engineering :: Chemistry',
+  'Topic :: Scientific/Engineering :: Artificial Intelligence',
+  'Programming Language :: Python :: 3.9',
+]
+keywords = [
+  "antibody-antigen interaction",
+  "geometric deep learning",
+  "computational biology",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
