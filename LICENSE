@@ -1,3 +1,21 @@
+DeepRank-AB follows the Apache License 2.0
+
+Copyright (c) 2025 Xiaotong Xu, Alexandre MJJ Bonvin
+
+DeepRank-Ab uses two external codes: 
+
+1) voronota follows The MIT License (MIT)
+
+Copyright (c) 2013-2023 Kliment Olechnovic
+
+https://github.com/kliment-olechnovic/voronota
+
+2) ANARCI follows BSD-3-Clause license
+
+Copyright 2019 Charlotte Deane, James Dunbar, Alexsandr Kovaltsuk, Claire Marks
+
+
+
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
