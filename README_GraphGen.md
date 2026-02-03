@@ -3,8 +3,8 @@
 This document explains the GraphGen implementation in `src/GraphGenMP.py` and the producer-consumer variant in `src/GraphGenMP.py.claude`. Both versions generate identical HDF5 outputs; the Claude variant improves throughput and scalability for large batches.
 
 **Files**
-- `src/GraphGenMP.py`: baseline implementation.
-- `src/GraphGenMP.py.claude`: producer-consumer implementation.
+- `src/GraphGenMP.py`: producer-consumer implementation (current default).
+- `src/GraphGenMP.py.backup`: original baseline implementation.
 
 **Common Behavior**
 - Builds residue- or atom-level graphs from a directory of PDB files.
