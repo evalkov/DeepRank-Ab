@@ -347,14 +347,19 @@ class AtomGraph(Graph):
         """
         Compute Voronota contact area between two atoms (nodes).
         Each node is (chainID, resSeq, resName, atomID, atomName).
+
+        Key format for voronota-lt: (chainID, resSeq, resName, atomName)
         """
         try:
-            at1 = node1
-            at2 = node2
-            at1k = (str(at1[3]), str(at1[0]), str(at1[1]), str(at1[2]), str(at1[4]))
-            at2k = (str(at2[3]), str(at2[0]), str(at2[1]), str(at2[2]), str(at2[4]))
-            return self.voro.contact_areas.get(at1k, {}).get(at2k, 0.0) or \
-                self.voro.contact_areas.get(at2k, {}).get(at1k, 0.0) or 0.0
+            # node format: (chainID, resSeq, resName, atomID, atomName)
+            # key format:  (chainID, resSeq, resName, atomName)
+            at1k = (str(node1[0]), str(node1[1]), str(node1[2]), str(node1[4]))
+            at2k = (str(node2[0]), str(node2[1]), str(node2[2]), str(node2[4]))
+            return (
+                self.voro.contact_areas.get(at1k, {}).get(at2k, 0.0) or
+                self.voro.contact_areas.get(at2k, {}).get(at1k, 0.0) or
+                0.0
+            )
         except Exception:
             return 0.0
 
