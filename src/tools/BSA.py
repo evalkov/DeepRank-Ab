@@ -1,47 +1,235 @@
-import os
+import subprocess
+from pathlib import Path
 import numpy as np
 from pdb2sql.interface import interface
 
-try:
-    import freesasa
 
-except ImportError:
-    print('Freesasa not found')
+class BSA:
+    """
+    Compute Buried Surface Area (BSA) using Voronota-LT.
+
+    BSA = SAS(unbound chain) - SAS(complex)
+
+    This replaces the freesasa-based implementation with voronota-lt,
+    which is faster and already used for contact area computation.
+    """
+
+    def __init__(self, pdb_data, sqldb=None, chainA='A', chainB='B', probe=1.4):
+        """
+        Initialize BSA calculator.
+
+        Args:
+            pdb_data: PDB filename (str) or pdb2sql interface
+            sqldb: Optional existing pdb2sql interface instance
+            chainA: First chain ID (default: 'A')
+            chainB: Second chain ID (default: 'B')
+            probe: Rolling probe radius in Angstroms (default: 1.4)
+        """
+        self.pdb_data = pdb_data
+        if sqldb is None:
+            self.sql = interface(pdb_data)
+            self._owns_sql = True
+        else:
+            self.sql = sqldb
+            self._owns_sql = False
+
+        self.chains_label = [chainA, chainB]
+        self.probe = probe
+        self.voronota_exec = self._get_voronota_executable()
+
+        # Will be populated by get_structure()
+        self.complex_sas = None
+        self.chain_sas = None
+
+        # Will be populated by get_contact_residue_sasa()
+        self.bsa_data = {}
+        self.bsa_data_xyz = {}
+
+    def get_structure(self):
+        """
+        Compute SAS for complex and individual chains using voronota-lt.
+
+        Runs voronota-lt 3 times:
+        - Once on full complex
+        - Once per chain (with atom restriction)
+        """
+        # Get PDB path
+        if isinstance(self.pdb_data, str):
+            pdb_path = self.pdb_data
+        else:
+            raise ValueError("BSA with voronota-lt requires a PDB file path")
+
+        # 1. Compute SAS for full complex
+        self.complex_sas = self._run_voronota_cells(pdb_path)
+
+        # 2. Compute SAS for each chain separately
+        self.chain_sas = {}
+        for chain in self.chains_label:
+            self.chain_sas[chain] = self._run_voronota_cells(
+                pdb_path,
+                restrict_atoms=f"[-chain {chain}]"
+            )
+
+    def _run_voronota_cells(self, pdb_path, restrict_atoms=None):
+        """
+        Run voronota-lt to get residue-level SAS areas.
+
+        Args:
+            pdb_path: Path to PDB file
+            restrict_atoms: Optional atom restriction expression (e.g., "[-chain A]")
+
+        Returns:
+            Dict mapping (chainID, resSeq, resName) -> sas_area
+        """
+        cmd = [
+            self.voronota_exec,
+            '--input', str(pdb_path),
+            '--probe', str(self.probe),
+            '--print-cells-residue-level',
+            '--quiet',
+        ]
+        if restrict_atoms:
+            cmd.extend(['--restrict-input-atoms', restrict_atoms])
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"voronota-lt failed with return code {result.returncode}: "
+                f"{result.stderr}"
+            )
+
+        return self._parse_cells_residue_level(result.stdout)
+
+    def _parse_cells_residue_level(self, output: str) -> dict:
+        """
+        Parse voronota-lt residue-level cells output.
+
+        Expected format (tab-separated):
+        ID_chain  ID_rnum  ID_rname  total_area  sas_area  volume  ...
+
+        Returns:
+            Dict mapping (chainID, resSeq, resName) -> sas_area
+        """
+        sas_data = {}
+        lines = output.strip().split('\n')
+
+        if not lines:
+            return sas_data
+
+        # Parse header to find column indices
+        header = lines[0].split('\t')
+        try:
+            chain_idx = header.index('ID_chain')
+            rnum_idx = header.index('ID_rnum')
+            rname_idx = header.index('ID_rname')
+            sas_idx = header.index('sas_area')
+        except ValueError as e:
+            # Fallback to positional indices if header parsing fails
+            chain_idx, rnum_idx, rname_idx, sas_idx = 0, 1, 2, 4
+
+        for line in lines[1:]:  # Skip header
+            if not line.strip():
+                continue
+
+            parts = line.split('\t')
+            if len(parts) <= max(chain_idx, rnum_idx, rname_idx, sas_idx):
+                continue
+
+            chain = parts[chain_idx]
+            resSeq = int(parts[rnum_idx])
+            resName = parts[rname_idx]
+            sas_area = float(parts[sas_idx])
+
+            key = (chain, resSeq, resName)
+            sas_data[key] = sas_area
+
+        return sas_data
+
+    def get_contact_residue_sasa(self, cutoff=8.5):
+        """
+        Compute BSA for contact residues.
+
+        BSA = SAS(unbound) - SAS(complex)
+
+        Args:
+            cutoff: Distance cutoff for contact residues (default: 8.5 Å)
+        """
+        if self.complex_sas is None or self.chain_sas is None:
+            raise RuntimeError("Call get_structure() before get_contact_residue_sasa()")
+
+        self.bsa_data = {}
+        self.bsa_data_xyz = {}
+
+        # Get contact residues from pdb2sql
+        contact_res = self.sql.get_contact_residues(cutoff=cutoff)
+        keys = list(contact_res.keys())
+        all_residues = contact_res[keys[0]] + contact_res[keys[1]]
+
+        # Batch query xyz coordinates for efficiency
+        xyz_cache = {}
+        for r in all_residues:
+            chain, resSeq = r[0], r[1]
+            xyz = np.mean(
+                self.sql.get('x,y,z', resSeq=resSeq, chainID=chain), axis=0
+            )
+            xyz_cache[(chain, resSeq)] = xyz
+
+        # Compute BSA for each contact residue
+        for r in all_residues:
+            chain, resSeq = r[0], r[1]
+
+            # Get resName - r might be (chain, resSeq) or (chain, resSeq, resName)
+            if len(r) >= 3:
+                resName = r[2]
+            else:
+                # Query resName from database
+                resName = self.sql.get('resName', resSeq=resSeq, chainID=chain)[0]
+
+            key = (chain, resSeq, resName)
+
+            # SAS in complex
+            asa_complex = self.complex_sas.get(key, 0.0)
+
+            # SAS when unbound (chain only)
+            asa_unbound = self.chain_sas[chain].get(key, 0.0)
+
+            # BSA = unbound - complex
+            bsa = asa_unbound - asa_complex
+
+            # Create xyz key for compatibility: (chain_idx, x, y, z)
+            chain_idx = {'A': 0, 'B': 1}.get(chain, 0)
+            xyz = xyz_cache[(chain, resSeq)]
+            xyzkey = tuple([chain_idx] + xyz.tolist())
+
+            # Store results (as list for compatibility with original interface)
+            self.bsa_data[key] = [bsa]
+            self.bsa_data_xyz[key] = xyzkey
+
+    @staticmethod
+    def _get_voronota_executable() -> str:
+        """Get path to voronota-lt executable."""
+        script_dir = Path(__file__).resolve().parent
+        root_dir = script_dir.parent
+        voronota_exec = root_dir / "tools" / "voronota" / "voronota-lt"
+        return str(voronota_exec)
 
 
-class BSA(object):
+# Legacy freesasa-based implementation for fallback/comparison
+class BSA_Freesasa:
+    """
+    Original freesasa-based BSA implementation.
+    Kept for comparison/fallback purposes.
+    """
 
     def __init__(self, pdb_data, sqldb=None, chainA='A', chainB='B'):
-        '''Compute the burried surface area feature
-
-        Freesasa is required for this feature.
-
-        https://freesasa.github.io
-
-        >>> wget http://freesasa.github.io/freesasa-2.0.2.tar.gz
-        >>> tar -xvf freesasa-2.0.3.tar.gz
-        >>> cd freesasa
-        >>> ./configure CFLAGS=-fPIC (--prefix /home/<user>/)
-        >>> make
-        >>> make install
-
-        Since release 2.0.3 the python bindings are separate module
-        >>> pip install freesasa
-
-        Args :
-            pdb_data (list(byte) or str): pdb data or filename of the pdb
-            sqldb (pdb2sql.interface instance or None, optional) if the sqldb is None the sqldb will be created
-            chainA (str, optional): name of the first chain
-            chainB (str, optional): name of the second chain
-
-        Example :
-
-        >>> bsa = BSA('1AK4.pdb')
-        >>> bsa.get_structure()
-        >>> bsa.get_contact_residue_sasa()
-        >>> bsa.sql.close()
-
-        '''
+        try:
+            import freesasa
+            self.freesasa = freesasa
+        except ImportError:
+            raise ImportError(
+                "freesasa not found. Install with: pip install freesasa"
+            )
 
         self.pdb_data = pdb_data
         if sqldb is None:
@@ -53,101 +241,71 @@ class BSA(object):
         freesasa.setVerbosity(freesasa.nowarnings)
 
     def get_structure(self):
-        """This method prepares three Freesasa “Structure” objects:
-        The full complex
-
-        Chain A alone
-
-        Chain B alone
-
-    """
-        """Get the pdb structure of the molecule."""
-# 1. FULL COMPLEX
-        # we can have a str or a list of bytes as input
+        """Prepare freesasa Structure objects for complex and chains."""
+        # Full complex
         if isinstance(self.pdb_data, str):
-            # If you passed a filename, it just hands that straight to freesasa.Structure(pdbfile), which parses it itself.
-            self.complex = freesasa.Structure(self.pdb_data)
+            self.complex = self.freesasa.Structure(self.pdb_data)
         else:
-            # if you passed a list of bytes, it will parse it itself. 
-            # create empty structure
-            self.complex = freesasa.Structure()
-            # take the columns from the pdb data
-            atomdata = self.sql.get(
-                'name,resName,resSeq,chainID,x,y,z')
-            # reformat and add the atoms to the structure
+            self.complex = self.freesasa.Structure()
+            atomdata = self.sql.get('name,resName,resSeq,chainID,x,y,z')
             for atomName, residueName, residueNumber, chainLabel, x, y, z in atomdata:
-                atomName = '{:>2}'.format(atomName[0])
+                atomName = '{:>2}'.format(atomName)  # Fixed: was atomName[0]
                 self.complex.addAtom(
-                    atomName, residueName, residueNumber, chainLabel, x, y, z)
-        #############   COMPUTE THE BSA FOR THE COMPLEX   #############
-        self.result_complex = freesasa.calc(self.complex)
+                    atomName, residueName, residueNumber, chainLabel, x, y, z
+                )
 
+        self.result_complex = self.freesasa.calc(self.complex)
 
-
-# 2. CHAINS
-        # we will store here the fresasa structure objects for each chain
+        # Individual chains
         self.chains = {}
-        # we will store here the result of the freesasa calc for each chain
         self.result_chains = {}
-        # for each chain
         for label in self.chains_label:
-            # empty structure
-            self.chains[label] = freesasa.Structure()
-            # adding the atoms to the structure
+            self.chains[label] = self.freesasa.Structure()
             atomdata = self.sql.get(
-                'name,resName,resSeq,chainID,x,y,z', chainID=label)
+                'name,resName,resSeq,chainID,x,y,z', chainID=label
+            )
             for atomName, residueName, residueNumber, chainLabel, x, y, z in atomdata:
-                atomName = '{:>2}'.format(atomName[0])
+                atomName = '{:>2}'.format(atomName)  # Fixed: was atomName[0]
                 self.chains[label].addAtom(
-                    atomName, residueName, residueNumber, chainLabel, x, y, z)
-            self.result_chains[label] = freesasa.calc(
-                self.chains[label])
+                    atomName, residueName, residueNumber, chainLabel, x, y, z
+                )
+            self.result_chains[label] = self.freesasa.calc(self.chains[label])
 
     def get_contact_residue_sasa(self, cutoff=8.5):
-        """Compute the feature value."""
-
-        # value
+        """Compute BSA for contact residues using freesasa."""
         self.bsa_data = {}
-        # where it is 
         self.bsa_data_xyz = {}
 
-        # find contact residues
         res = self.sql.get_contact_residues(cutoff=cutoff)
-        # save theorder of the chains
         keys = list(res.keys())
-        # concatenates the two lists containing the residues of the interface in both chains
-        res = res[keys[0]]+res[keys[1]]
+        res = res[keys[0]] + res[keys[1]]
 
-        # for each residue in the interface
-        # ex. r = ('A', 125)
         for r in res:
+            chain, resSeq = r[0], r[1]
+            resName = r[2] if len(r) >= 3 else self.sql.get(
+                'resName', resSeq=resSeq, chainID=chain
+            )[0]
 
-            # sselect the residue and the chain
-            select_str = ('res, (resi %d) and (chain %s)' %
-                          (r[1], r[0]),)
-            # free sasa tells us the saea  (strs)
-            asa_complex = freesasa.selectArea(
-                select_str, self.complex, self.result_complex)['res']
+            # SAS in complex
+            select_str = ('res, (resi %d) and (chain %s)' % (resSeq, chain),)
+            asa_complex = self.freesasa.selectArea(
+                select_str, self.complex, self.result_complex
+            )['res']
 
-            # same when the residue is isolated
-            select_str = ('res, resi %d' % r[1],)
-            asa_unbound = freesasa.selectArea(
-                select_str, self.chains[r[0]], self.result_chains[r[0]])['res']
+            # SAS when unbound
+            select_str = ('res, resi %d' % resSeq,)
+            asa_unbound = self.freesasa.selectArea(
+                select_str, self.chains[chain], self.result_chains[chain]
+            )['res']
 
-            # define the bsa (area unbound - area complex)
-            bsa = asa_unbound-asa_complex
+            bsa = asa_unbound - asa_complex
 
-            # define the xyz key : (chain,x,y,z)
-            chain = {'A': 0, 'B': 1}[r[0]] # assign 0 to A and 1 to B
-            # get the average xyz of the residue to get the
-            # geometric center of the residue
-            xyz = np.mean(self.sql.get(
-                'x,y,z', resSeq=r[1], chainID=r[0]), 0)
-            
-            # [0, 12.3, -7.8, 5.6]
-            xyzkey = tuple([chain]+xyz.tolist())
+            chain_idx = {'A': 0, 'B': 1}.get(chain, 0)
+            xyz = np.mean(
+                self.sql.get('x,y,z', resSeq=resSeq, chainID=chain), axis=0
+            )
+            xyzkey = tuple([chain_idx] + xyz.tolist())
 
-            # put the data in dict
-            self.bsa_data[r] = [bsa]
-            self.bsa_data_xyz[r] = xyzkey
-
+            key = (chain, resSeq, resName)
+            self.bsa_data[key] = [bsa]
+            self.bsa_data_xyz[key] = xyzkey
