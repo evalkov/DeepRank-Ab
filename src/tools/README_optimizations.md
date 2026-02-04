@@ -156,6 +156,22 @@ Where:
 
 ---
 
+## Benchmarks
+
+Pipeline timing on 4 shards (48-core HPC node):
+
+| Stage | Before (s) | After (s) | Speedup |
+|-------|------------|-----------|---------|
+| prep | 143.7 (3.5%) | 143.8 (8.3%) | 1.0× |
+| annotate | 110.3 (2.7%) | 111.2 (6.4%) | 1.0× |
+| **graphs** | **3762.5 (92.2%)** | **1418.9 (81.6%)** | **2.65×** |
+| cluster | 65.2 (1.6%) | 65.5 (3.8%) | 1.0× |
+| **total** | **4081.6** | **1739.4** | **2.35×** |
+
+Graph generation time reduced by **62%**, dropping from 92% to 82% of total pipeline time.
+
+---
+
 ## Scientific Accuracy
 
 These optimizations are purely algorithmic and do not affect scientific accuracy:
