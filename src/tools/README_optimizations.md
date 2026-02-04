@@ -230,13 +230,13 @@ Pipeline timing on 4 shards (48-core HPC node):
 
 | Stage | Before (s) | After (s) | Speedup |
 |-------|------------|-----------|---------|
-| prep | 143.7 (3.5%) | 143.4 (8.5%) | 1.0× |
-| annotate | 110.3 (2.7%) | 111.3 (6.6%) | 1.0× |
-| **graphs** | **3762.5 (92.2%)** | **1368.9 (81.1%)** | **2.75×** |
-| cluster | 65.2 (1.6%) | 65.1 (3.9%) | 1.0× |
-| **total** | **4081.6** | **1688.8** | **2.42×** |
+| prep | 143.7 (3.5%) | 75.8 (4.7%) | **1.9×** |
+| annotate | 110.3 (2.7%) | 93.8 (5.8%) | 1.2× |
+| **graphs** | **3762.5 (92.2%)** | **1368.2 (85.3%)** | **2.75×** |
+| cluster | 65.2 (1.6%) | 65.5 (4.1%) | 1.0× |
+| **total** | **4081.6** | **1603.3** | **2.55×** |
 
-Graph generation time reduced by **64%**, dropping from 92% to 81% of total pipeline time.
+Graph generation time reduced by **64%**. Prep time reduced by **47%** (eliminated redundant PDB parsing). Total pipeline **2.55× faster**.
 
 ---
 
@@ -249,6 +249,62 @@ These optimizations are purely algorithmic and do not affect scientific accuracy
 - **Pre-fetching** uses the same coordinates, just stored temporarily
 
 All computed features (distances, energies, orientations, contact areas) remain identical.
+
+---
+
+## 7. PDB Parsing (Prep Stage)
+
+**File:** `scripts/split_stageA_cpu.py`
+
+**Problem:** `build_merged_structure()` parsed the same PDB file 4 times - once for the structure, then 3 more times to extract chain sequences.
+
+```python
+# Before: 4 parses per structure
+struct = parser.get_structure(pdb_path.stem, str(pdb_path))  # 1st parse
+seqH = chain_sequence_from_pdb(pdb_path, heavy_chain_id)     # 2nd parse
+seqL = chain_sequence_from_pdb(pdb_path, light_chain_id)     # 3rd parse
+seqAg = chain_sequence_from_pdb(pdb_path, antigen_chain_id)  # 4th parse
+```
+
+**Solution:** Extract sequences from the already-parsed model.
+
+```python
+# After: 1 parse per structure
+struct = parser.get_structure(pdb_path.stem, str(pdb_path))
+model_in = struct[0]
+seqH = _chain_sequence_from_model(model_in, heavy_chain_id)
+seqL = _chain_sequence_from_model(model_in, light_chain_id)
+seqAg = _chain_sequence_from_model(model_in, antigen_chain_id)
+```
+
+**Result:** Prep stage **47% faster** (143.7s → 75.8s)
+
+---
+
+## 8. Embedding File Caching
+
+**File:** `scripts/inference.py`
+
+**Problem:** `add_embedding()` loaded the same `.pt` file repeatedly for each residue in the same chain.
+
+```python
+# Before: N loads for N residues
+for i, res in enumerate(residues):
+    data = torch.load(pt, map_location="cpu")  # repeated!
+```
+
+**Solution:** Cache loaded files by path.
+
+```python
+# After: 1 load per unique chain
+pt_cache = {}
+for i, res in enumerate(residues):
+    if pt_key not in pt_cache:
+        pt_cache[pt_key] = torch.load(pt, map_location="cpu")["representations"][33]
+    vecs = pt_cache[pt_key]
+```
+
+**Result:** For 200-residue chains, reduces file loads from 200 to 2.
 
 ---
 
