@@ -180,8 +180,8 @@ case "${VORONOTA_BINARY}" in
     VORONOTA_TYPE="additive tessellation"
     export USE_VORONOTA_LT=0
     ;;
-  voronota_129|voronota-opt)
-    VORONOTA_BIN="${VORONOTA_DIR}/voronota-opt"
+  voronota_129)
+    VORONOTA_BIN="${VORONOTA_DIR}/voronota_129"
     VORONOTA_TYPE="additive tessellation"
     export USE_VORONOTA_LT=0
     ;;

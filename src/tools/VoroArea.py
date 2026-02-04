@@ -1,7 +1,7 @@
 # Select voronota binary for contact area computation.
 # VORONOTA_BINARY options:
 #   - "voronota"     (default) - legacy v1.28, additive tessellation, validated
-#   - "voronota_129" or "voronota-opt" - v1.29, additive tessellation
+#   - "voronota_129" - v1.29, additive tessellation
 #   - "voronota-lt"  - radical tessellation, faster but less accurate
 # Legacy USE_VORONOTA_LT is still supported for backwards compatibility.
 import os
@@ -106,8 +106,7 @@ class VoronotaAreasLegacy:
         # Map VORONOTA_BINARY to actual binary name
         binary_map = {
             "voronota": "voronota",
-            "voronota_129": "voronota-opt",
-            "voronota-opt": "voronota-opt",
+            "voronota_129": "voronota_129",
         }
         binary_name = binary_map.get(_VORONOTA_BINARY, "voronota")
         return str(voronota_dir / binary_name)
