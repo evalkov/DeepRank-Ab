@@ -126,7 +126,6 @@ class AtomGraph(Graph):
         
         #get edge features
         self.get_edge_features(db)
-        print('use contact features:', self.edge_features)
         
         # close db
         db._close()
