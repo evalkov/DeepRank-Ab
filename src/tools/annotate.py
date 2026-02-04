@@ -10,7 +10,6 @@ from anarci import anarci
 
 BASE = Path(__file__).resolve().parent
 hmmscan_path = BASE / "ANARCI"
-print("Using ANARCI path:", hmmscan_path)
 
 # residue code map (includes MSE -> M)
 THREE_TO_ONE = {
@@ -268,6 +267,130 @@ def _annotate_single_wrapper(args):
         return None
 
 
+def _extract_sequences_for_anarci(args):
+    """
+    Phase 1: Extract sequences from a single PDB without running ANARCI.
+    Returns records for ANARCI and metadata for later annotation mapping.
+    """
+    fasta_file, pdb_file, antigen_chainid = args
+    fasta_file = Path(fasta_file)
+    pdb_file = Path(pdb_file)
+
+    try:
+        parser = PDBParser(QUIET=True)
+
+        seqs = [
+            record
+            for record in SeqIO.parse(str(fasta_file), "fasta")
+            if record.seq and str(record.seq).strip()
+        ]
+        if len(seqs) not in (1, 2):
+            return None
+
+        ref = {}
+        for rec in seqs:
+            role = _norm_role_from_id(rec.id)
+            if role not in ("H", "L"):
+                return None
+            ref[role] = str(rec.seq).replace("\n", "").strip()
+
+        if "H" not in ref or not ref["H"]:
+            return None
+
+        seqH = ref["H"]
+        seqL = ref.get("L", "")
+
+        model_name = pdb_file.stem
+        struct = parser.get_structure(model_name, str(pdb_file))
+        model0 = struct[0]
+
+        all_chainids = [chain.id for chain in model0]
+        if antigen_chainid not in all_chainids:
+            return None
+
+        chainid_antibody = [cid for cid in all_chainids if cid != antigen_chainid]
+        if not chainid_antibody:
+            return None
+
+        ab_cid = chainid_antibody[0]
+        chainAb_seq = extract_chain_sequence(model0[ab_cid])
+
+        # Locate heavy
+        try:
+            h0, _ = locate(seqH, chainAb_seq, f"{model_name}_H")
+            orig_h0 = h0
+            while h0 > 0 and chainAb_seq[h0] != seqH[0]:
+                h0 -= 1
+        except RuntimeError:
+            return None
+
+        # Locate light
+        l0 = None
+        if seqL:
+            try:
+                l0, _ = locate(seqL, chainAb_seq, f"{model_name}_L")
+                orig_l0 = l0
+                while l0 > 0 and chainAb_seq[l0] != seqL[0]:
+                    l0 -= 1
+            except RuntimeError:
+                return None
+
+        # Variable domains
+        varH = seqH[:130] if seqH else ""
+        varL = seqL[:130] if seqL else ""
+
+        records = []
+        mapping = []
+
+        if varH:
+            records.append((f"{model_name}_H", varH))
+            mapping.append({"model": model_name, "chain": "H", "start": h0, "seq": chainAb_seq})
+
+        if varL and l0 is not None:
+            records.append((f"{model_name}_L", varL))
+            mapping.append({"model": model_name, "chain": "L", "start": l0, "seq": chainAb_seq})
+
+        if not records:
+            return None
+
+        return {"records": records, "mapping": mapping}
+
+    except Exception:
+        return None
+
+
+def _apply_numbering_to_mapping(mapping_entry, numbering_entry):
+    """
+    Phase 3: Apply ANARCI numbering to create annotation for a single chain.
+    """
+    model_key = f"{mapping_entry['model']}.pdb"
+    chain_role = mapping_entry["chain"]
+    start = mapping_entry["start"]
+    seq = mapping_entry["seq"]
+
+    # Default: everything CONST
+    ann = [(aa, "CONST") for aa in seq]
+
+    if not numbering_entry:
+        return model_key, ann
+
+    aligned = numbering_entry[0][0]  # list of ((position, ins), aa)
+    region_fn = region_h if chain_role == "H" else region_l
+
+    idx = start
+    for ((pos, _ins), aa) in aligned:
+        if aa == "-":
+            continue
+        while idx < len(ann) and ann[idx][0] != aa:
+            idx += 1
+        if idx >= len(ann):
+            break
+        ann[idx] = (aa, region_fn(pos))
+        idx += 1
+
+    return model_key, ann
+
+
 def annotate_folder_one_by_one_mp(
     folder: Path,
     fasta_folder: Path,
@@ -276,7 +399,8 @@ def annotate_folder_one_by_one_mp(
     antigen_chainid: str = "A",
 ):
     """
-    Annotate all PDB files in a folder using corresponding fasta files in parallel.
+    Annotate all PDB files in a folder using corresponding fasta files.
+    Uses batched ANARCI call to reduce HMMER startup overhead.
 
     For each PDB: expects FASTA named: <pdb_stem>_HL.fasta
 
@@ -298,17 +422,62 @@ def annotate_folder_one_by_one_mp(
             continue
         tasks.append((fasta_file, pdb_file, antigen_chainid))
 
+    if not tasks:
+        out_dir = folder / output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / "annotations_cdrs.json"
+        with open(out_file, "w") as f:
+            json.dump({}, f, indent=2)
+        return
+
     n_processes = int(n_cores) if n_cores else (os.cpu_count() or 1)
 
-    all_annotations = {}
-    if tasks:
-        with Pool(processes=n_processes) as pool:
-            results = pool.map(_annotate_single_wrapper, tasks)
+    # Phase 1: Extract sequences in parallel
+    with Pool(processes=n_processes) as pool:
+        extraction_results = pool.map(_extract_sequences_for_anarci, tasks)
 
-        for res in results:
-            if not res:
-                continue
-            all_annotations.update(res)
+    # Collect all records for batched ANARCI call
+    all_records = []
+    all_mappings = []
+    record_indices = []  # Track which extraction result each record belongs to
+
+    for i, result in enumerate(extraction_results):
+        if result is None:
+            continue
+        for j, rec in enumerate(result["records"]):
+            all_records.append(rec)
+            all_mappings.append(result["mapping"][j])
+            record_indices.append(i)
+
+    if not all_records:
+        out_dir = folder / output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_file = out_dir / "annotations_cdrs.json"
+        with open(out_file, "w") as f:
+            json.dump({}, f, indent=2)
+        return
+
+    # Phase 2: Single batched ANARCI call (main optimization)
+    numbering, _, _ = anarci(
+        all_records,
+        scheme="imgt",
+        assign_germline=True,
+        output=False,
+        hmmerpath=hmmscan_path,
+    )
+
+    # Phase 3: Map results back to annotations
+    all_annotations = {}
+    for mapping_entry, num_entry in zip(all_mappings, numbering):
+        model_key, ann = _apply_numbering_to_mapping(mapping_entry, num_entry)
+        # Merge annotations (H and L chains for same model)
+        if model_key in all_annotations:
+            existing = all_annotations[model_key]
+            for idx, (aa, region) in enumerate(ann):
+                if region != "CONST" and idx < len(existing):
+                    existing[idx] = (aa, region)
+        else:
+            all_annotations[model_key] = ann
 
     out_dir = folder / output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
