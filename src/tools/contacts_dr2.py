@@ -202,8 +202,10 @@ def add_residue_contacts_atomgraph(graph, db):
 
     # collect per-atom data for each residue node
     all_atoms: List[Atom] = []
+    # Build lookup dict for O(1) access instead of O(N) linear search per edge
+    atom_to_idx: dict = {}
+
     for node in graph.nx.nodes:
-        #chainID, resSeq, resName = node
         chainID, resSeq, resName, atomid, atomname = node
         raw = db.get("name,x,y,z", chainID=chainID, resSeq=int(resSeq))
 
@@ -213,30 +215,34 @@ def add_residue_contacts_atomgraph(graph, db):
             for r in raw
         ]
 
-        idxs = []
         for name, x, y, z in raw:
             # minimal atom record
             atom_name = name.decode() if isinstance(name, (bytes, bytearray)) else name
             pos = np.array([x, y, z], dtype=float)
+            idx = len(all_atoms)
             all_atoms.append(Atom(chainID, resName, resSeq, atom_name, atom_names, pos))
-            idxs.append(len(all_atoms) - 1)
-
+            # Key: (chain, resName, resSeq, atomName) for O(1) lookup
+            atom_to_idx[(chainID, resName, resSeq, atom_name)] = idx
 
     # nonbonded matrices once for all atoms
     D, E_elec, E_vdw = compute_nonbonded(all_atoms, ff)
 
+    # Process edges with O(1) lookup instead of O(N) linear search
     for u, v in graph.nx.edges:
-        #edges ('A', 1, 'GLN', 6145, 'N')
-        #print(all_atoms[0].chain, all_atoms[0].res_name, all_atoms[0].res_seq, all_atoms[0].atom_name)
+        # node format: (chainID, resSeq, resName, atomID, atomName)
+        # lookup key:  (chain, resName, resSeq, atomName)
+        key1 = (u[0], u[2], u[1], u[4])
+        key2 = (v[0], v[2], v[1], v[4])
 
-        idx1 = [i for i, a in enumerate(all_atoms) if (a.chain, a.res_name, a.res_seq, a.atom_name) == (u[0], u[2], u[1], u[4])]
-        idx2 = [i for i, a in enumerate(all_atoms) if (a.chain, a.res_name, a.res_seq, a.atom_name) == (v[0], v[2], v[1], v[4])]
-        if idx1[0] == idx2[0]:
+        idx1 = atom_to_idx.get(key1)
+        idx2 = atom_to_idx.get(key2)
+
+        if idx1 is None or idx2 is None or idx1 == idx2:
             continue
 
-        d = float(D[idx1[0], idx2[0]])
-        e_sum = float(E_elec[idx1[0], idx2[0]])
-        v_sum = float(E_vdw[idx1[0], idx2[0]])
+        d = float(D[idx1, idx2])
+        e_sum = float(E_elec[idx1, idx2])
+        v_sum = float(E_vdw[idx1, idx2])
         cov = float(d < COVALENT_CUTOFF)
 
         graph.nx.edges[u, v]["dist"] = d
