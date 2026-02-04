@@ -390,12 +390,15 @@ class GraphHDF5(object):
             for mol in mols:
                 residues = f[mol]['nodes'][()]
                 emb_tensor = torch.zeros(len(residues), 1)
-                
+
                 try:
                     pdb_file = next(i for i in pdbs if mol in i)
                 except StopIteration:
                     pdb_file = None
-                
+
+                # Cache loaded .pt files to avoid repeated loading for same chain
+                pt_cache = {}
+
                 for i in range(len(residues)):
                     chainID = residues[i][0].decode()
                     resID   = residues[i][1].decode()
@@ -403,12 +406,16 @@ class GraphHDF5(object):
                     pt_path = os.path.join(embedding_path, pt_name)
                     res_number = int(resID)
                     try:
-                        data = torch.load(pt_path)
-                        embedding = data["representations"][33][res_number - 1].mean()
+                        # Load from cache or file
+                        if pt_path not in pt_cache:
+                            data = torch.load(pt_path)
+                            pt_cache[pt_path] = data["representations"][33]
+                        vecs = pt_cache[pt_path]
+                        embedding = vecs[res_number - 1].mean()
                         emb_tensor[i] = embedding
                     except Exception:
                         emb_tensor[i] = 0
-                
+
                 grp = f[mol].require_group('node_data')
                 if 'embedding' in grp:
                     del grp['embedding']
