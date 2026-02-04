@@ -1,7 +1,7 @@
-# Re-export optimized VoronotaAreas from VoroContacts
-from tools.VoroContacts import VoronotaAreas
-
-# Legacy implementation below for fallback to original two-step voronota binary
+# Toggle between voronota-lt (fast, radical tessellation) and voronota (original, additive tessellation)
+# Set USE_VORONOTA_LT=0 to use original voronota for accuracy comparison
+import os
+_USE_LT = os.environ.get("USE_VORONOTA_LT", "0").strip() not in ("0", "false", "no", "off", "")
 
 import subprocess
 from pathlib import Path
@@ -11,13 +11,16 @@ import numpy as np
 class VoronotaAreasLegacy:
     """
     Original two-step voronota implementation using legacy voronota binary.
-    Kept for comparison/fallback purposes.
+
+    Uses additively weighted Voronoi tessellation (bisecting planes shifted by radii).
+    This is the scientifically validated algorithm from the original DeepRank.
 
     Pipeline: voronota get-balls-from-atoms-file | voronota calculate-contacts
     """
 
-    def __init__(self, pdb_path):
+    def __init__(self, pdb_path, probe=1.4):
         self.voronota_exec = self.get_voronota_executable()
+        self.probe = probe
         self.contact_areas = self._get_voronota_contacts(pdb_path)
 
     def _get_voronota_contacts(self, pdb_path) -> dict[tuple, dict[tuple, float]]:
@@ -55,14 +58,24 @@ class VoronotaAreasLegacy:
 
     @staticmethod
     def load_balls(_balls_data) -> dict[int, tuple]:
-        """Parse balls output: 'x y z r # atomID chainID resSeq resName atomName'."""
+        """
+        Parse balls output: 'x y z r # atomID chainID resSeq resName atomName'.
+
+        Returns 4-tuple keys (chainID, resSeq, resName, atomName) to match
+        the interface expected by AtomGraph and ResidueGraph.
+        """
         lines = _balls_data.decode("utf-8")
         balls_data = {}
         for index, line in enumerate(lines.split("\n")):
             if not line.strip():
                 continue
+            # Format: x y z r # atomID chainID resSeq resName atomName
             atom_dt = line.split("#")[-1].strip().split(" ")
-            desired_at_dt = tuple(atom_dt[:5])
+            # Skip atomID (index 0), use chainID, resSeq, resName, atomName
+            if len(atom_dt) >= 5:
+                desired_at_dt = (atom_dt[1], atom_dt[2], atom_dt[3], atom_dt[4])
+            else:
+                continue
             balls_data[index] = desired_at_dt
         return balls_data
 
@@ -96,3 +109,10 @@ class VoronotaAreasLegacy:
         contacts_outputs, _ = contacts.communicate(input=balls_outputs)
 
         return balls_outputs, contacts_outputs
+
+
+# Conditional export based on USE_VORONOTA_LT environment variable
+if _USE_LT:
+    from tools.VoroContacts import VoronotaAreas
+else:
+    VoronotaAreas = VoronotaAreasLegacy
