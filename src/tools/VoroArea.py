@@ -1,7 +1,24 @@
-# Toggle between voronota-lt (fast, radical tessellation) and voronota (original, additive tessellation)
-# Set USE_VORONOTA_LT=0 to use original voronota for accuracy comparison
+# Select voronota binary for contact area computation.
+# VORONOTA_BINARY options:
+#   - "voronota"     (default) - legacy v1.28, additive tessellation, validated
+#   - "voronota_129" - v1.29, additive tessellation
+#   - "voronota-lt"  - radical tessellation, faster but less accurate
+# Legacy USE_VORONOTA_LT is still supported for backwards compatibility.
 import os
-_USE_LT = os.environ.get("USE_VORONOTA_LT", "0").strip() not in ("0", "false", "no", "off", "")
+
+def _get_voronota_binary():
+    """Determine which voronota binary to use."""
+    binary = os.environ.get("VORONOTA_BINARY", "").strip().lower()
+    if binary:
+        return binary
+    # Fallback to legacy USE_VORONOTA_LT for backwards compatibility
+    use_lt = os.environ.get("USE_VORONOTA_LT", "0").strip()
+    if use_lt not in ("0", "false", "no", "off", ""):
+        return "voronota-lt"
+    return "voronota"
+
+_VORONOTA_BINARY = _get_voronota_binary()
+_USE_LT = _VORONOTA_BINARY == "voronota-lt"
 
 import subprocess
 from pathlib import Path
@@ -81,10 +98,18 @@ class VoronotaAreasLegacy:
 
     @staticmethod
     def get_voronota_executable() -> str:
+        """Get path to voronota binary based on VORONOTA_BINARY env var."""
         script_dir = Path(__file__).resolve().parent
         root_dir = script_dir.parent
-        voronota_exec = root_dir / "tools" / "voronota" / "voronota"
-        return str(voronota_exec)
+        voronota_dir = root_dir / "tools" / "voronota"
+
+        # Map VORONOTA_BINARY to actual binary name
+        binary_map = {
+            "voronota": "voronota",
+            "voronota_129": "voronota_129",
+        }
+        binary_name = binary_map.get(_VORONOTA_BINARY, "voronota")
+        return str(voronota_dir / binary_name)
 
     @staticmethod
     def run_voro_contacts(pdb_fpath, voronota_exec) -> tuple[bytes, bytes]:

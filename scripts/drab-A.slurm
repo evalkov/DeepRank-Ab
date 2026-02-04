@@ -164,27 +164,48 @@ start_monitor
 # ============================================================
 # VORONOTA / BSA BACKEND CONFIGURATION
 # ============================================================
-# USE_VORONOTA_LT: 0 = legacy voronota (default, accurate), 1 = voronota-lt (fast)
-# USE_FREESASA:    1 = freesasa (default, validated), 0 = voronota-lt (fast)
-export USE_VORONOTA_LT="${USE_VORONOTA_LT:-0}"
+# VORONOTA_BINARY: which voronota binary to use for contact area computation
+#   - voronota     (default) - legacy v1.28, additive tessellation, validated
+#   - voronota_129           - v1.29, additive tessellation
+#   - voronota-lt            - radical tessellation, faster but less accurate
+# USE_FREESASA: 1 = freesasa (default, validated), 0 = voronota-lt (fast)
+export VORONOTA_BINARY="${VORONOTA_BINARY:-voronota}"
 export USE_FREESASA="${USE_FREESASA:-1}"
 
-# Locate voronota binary and get version
+# Locate voronota binary and determine tessellation type
 VORONOTA_DIR="${DEEPRANK_ROOT}/src/tools/voronota"
-if [[ "${USE_VORONOTA_LT}" == "0" ]]; then
-  VORONOTA_BIN="${VORONOTA_DIR}/voronota"
-  VORONOTA_TYPE="legacy, additive tessellation"
-else
-  VORONOTA_BIN="${VORONOTA_DIR}/voronota-lt"
-  VORONOTA_TYPE="radical tessellation"
+case "${VORONOTA_BINARY}" in
+  voronota)
+    VORONOTA_BIN="${VORONOTA_DIR}/voronota"
+    VORONOTA_TYPE="additive tessellation"
+    export USE_VORONOTA_LT=0
+    ;;
+  voronota_129)
+    VORONOTA_BIN="${VORONOTA_DIR}/voronota_129"
+    VORONOTA_TYPE="additive tessellation"
+    export USE_VORONOTA_LT=0
+    ;;
+  voronota-lt)
+    VORONOTA_BIN="${VORONOTA_DIR}/voronota-lt"
+    VORONOTA_TYPE="radical tessellation"
+    export USE_VORONOTA_LT=1
+    ;;
+  *)
+    echo "[StageA] ERROR: Unknown VORONOTA_BINARY=${VORONOTA_BINARY}"
+    echo "[StageA]   Valid options: voronota (default), voronota_129, voronota-lt"
+    exit 1
+    ;;
+esac
+
+# Verify binary exists
+if [[ ! -x "${VORONOTA_BIN}" ]]; then
+  echo "[StageA] ERROR: voronota binary not found or not executable: ${VORONOTA_BIN}"
+  exit 1
 fi
 
 # Extract version number (e.g., "Voronota version 1.28.4054" -> "1.28.4054")
-VORONOTA_VERSION="unknown"
-if [[ -x "${VORONOTA_BIN}" ]]; then
-  VORONOTA_VERSION=$("${VORONOTA_BIN}" 2>&1 | head -1 | sed -n 's/.*version \([0-9.]*\).*/\1/p')
-  [[ -z "${VORONOTA_VERSION}" ]] && VORONOTA_VERSION="unknown"
-fi
+VORONOTA_VERSION=$("${VORONOTA_BIN}" 2>&1 | head -1 | sed -n 's/.*version \([0-9.]*\).*/\1/p')
+[[ -z "${VORONOTA_VERSION}" ]] && VORONOTA_VERSION="unknown"
 VORONOTA_BACKEND="$(basename "${VORONOTA_BIN}") ${VORONOTA_VERSION} (${VORONOTA_TYPE})"
 
 if [[ "${USE_FREESASA}" == "1" ]]; then
