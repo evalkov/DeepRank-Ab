@@ -230,13 +230,13 @@ Pipeline timing on 4 shards (48-core HPC node):
 
 | Stage | Before (s) | After (s) | Speedup |
 |-------|------------|-----------|---------|
-| prep | 143.7 (3.5%) | 143.8 (8.3%) | 1.0× |
-| annotate | 110.3 (2.7%) | 111.2 (6.4%) | 1.0× |
-| **graphs** | **3762.5 (92.2%)** | **1418.9 (81.6%)** | **2.65×** |
-| cluster | 65.2 (1.6%) | 65.5 (3.8%) | 1.0× |
-| **total** | **4081.6** | **1739.4** | **2.35×** |
+| prep | 143.7 (3.5%) | 143.4 (8.5%) | 1.0× |
+| annotate | 110.3 (2.7%) | 111.3 (6.6%) | 1.0× |
+| **graphs** | **3762.5 (92.2%)** | **1368.9 (81.1%)** | **2.75×** |
+| cluster | 65.2 (1.6%) | 65.1 (3.9%) | 1.0× |
+| **total** | **4081.6** | **1688.8** | **2.42×** |
 
-Graph generation time reduced by **62%**, dropping from 92% to 82% of total pipeline time.
+Graph generation time reduced by **64%**, dropping from 92% to 81% of total pipeline time.
 
 ---
 
