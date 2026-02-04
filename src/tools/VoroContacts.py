@@ -30,7 +30,7 @@ class VoroContacts:
         self,
         pdb_path,
         probe=1.4,
-        processors=4,
+        processors=1,
         compute_contacts=True,
         compute_bsa=True,
         chain_ids=('A', 'B'),
