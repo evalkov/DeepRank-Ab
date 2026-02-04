@@ -3,10 +3,10 @@
 #SBATCH --partition=norm
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=48
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=64G
 #SBATCH --time=00:30:00
-#SBATCH --array=0-3%4
+#SBATCH --array=0-9%10
 #SBATCH --output=%x_%A_%a.log
 #SBATCH --error=%x_%A_%a.err
 
