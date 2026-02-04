@@ -248,9 +248,10 @@ class ResidueGraph(Graph):
         - optional local-frame orientation per edge
         - optional residue contact features
         """
-        # edge index (directed)
+        # edge index (directed) - use dict for O(1) lookup instead of O(n) list.index()
         node_keys = list(self.nx.nodes)
-        directed_idx = [[node_keys.index(u), node_keys.index(v)] for u, v in self.nx.edges]
+        node_to_idx = {node: i for i, node in enumerate(node_keys)}
+        directed_idx = [[node_to_idx[u], node_to_idx[v]] for u, v in self.nx.edges]
         self.nx.edge_index = directed_idx
 
         # rij = pos[j] - pos[i]
@@ -267,12 +268,19 @@ class ResidueGraph(Graph):
 
         # orientation (optional)
         if self.add_orientation:
+            # Batch fetch all backbone atoms once instead of 3 queries per residue
+            backbone_coords = {}
+            for name in ("CA", "C", "N"):
+                for row in db.get("chainID,resSeq,x,y,z", name=name):
+                    chain, resseq, x, y, z = row
+                    backbone_coords[(chain, int(resseq), name)] = (x, y, z)
+
             pos_CA, pos_C, pos_N = [], [], []
             for (chain, resseq, _), _ in self.nx.nodes(data=True):
-                sel = dict(chainID=chain, resSeq=int(resseq))
-                pos_CA.append(db.get("x,y,z", name="CA", **sel)[0])
-                pos_C.append(db.get("x,y,z", name="C", **sel)[0])
-                pos_N.append(db.get("x,y,z", name="N", **sel)[0])
+                resseq_int = int(resseq)
+                pos_CA.append(backbone_coords.get((chain, resseq_int, "CA"), (0, 0, 0)))
+                pos_C.append(backbone_coords.get((chain, resseq_int, "C"), (0, 0, 0)))
+                pos_N.append(backbone_coords.get((chain, resseq_int, "N"), (0, 0, 0)))
             pos_CA = torch.tensor(pos_CA, dtype=torch.float)
             pos_C = torch.tensor(pos_C, dtype=torch.float)
             pos_N = torch.tensor(pos_N, dtype=torch.float)
@@ -308,17 +316,28 @@ class ResidueGraph(Graph):
         Find intra-chain edges and minimal atom-atom distance between residue pairs.
         """
         nn = len(nodes)
+        if nn == 0:
+            return [], []
+
+        # Pre-fetch all coordinates for all nodes in this chain (O(n) queries instead of O(n²))
+        node_coords = {}
+        for node in nodes:
+            xyz = np.array(db.get("x,y,z", chainID=node[0], resSeq=node[1]))
+            node_coords[node] = xyz
+
         edges, dist = [], []
+        cutoff_sq = cutoff ** 2
         for i1 in range(nn):
-            xyz1 = np.array(db.get("x,y,z", chainID=nodes[i1][0], resSeq=nodes[i1][1]))
+            xyz1 = node_coords[nodes[i1]]
+            xyz1_sq = np.sum(xyz1**2, axis=1)[:, None]
             for i2 in range(i1 + 1, nn):
-                xyz2 = np.array(db.get("x,y,z", chainID=nodes[i2][0], resSeq=nodes[i2][1]))
+                xyz2 = node_coords[nodes[i2]]
                 d2 = (
                     -2 * np.dot(xyz1, xyz2.T)
-                    + np.sum(xyz1**2, axis=1)[:, None]
+                    + xyz1_sq
                     + np.sum(xyz2**2, axis=1)
                 )
-                if np.any(d2 < cutoff**2):
+                if np.any(d2 < cutoff_sq):
                     edges.append((nodes[i1], nodes[i2]))
                     dist.append(np.sqrt(np.min(d2)))
         return edges, dist

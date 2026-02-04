@@ -307,26 +307,45 @@ class AtomGraph(Graph):
         - optional local-frame orientation per edge
         - optional residue contact features
         """
-        # edge index (directed)
+        # Build node index lookup for O(1) access instead of O(n) list.index()
         node_keys = list(self.nx.nodes)
-        directed_idx = [[node_keys.index(u), node_keys.index(v)] for u, v in self.nx.edges]
+        node_to_idx = {node: i for i, node in enumerate(node_keys)}
+
+        # edge index (directed) - O(1) lookup per edge instead of O(n)
+        directed_idx = [[node_to_idx[u], node_to_idx[v]] for u, v in self.nx.edges]
         self.nx.edge_index = directed_idx
 
         for idx, (u, v) in enumerate(self.nx.edges):
-            # self.nx.edges[u, v]["rij"] = rij[idx][0]
             if self.use_voro:
                 area = self._get_voro_contact_area(u, v)
                 self.nx.edges[u, v]["voro_area"] = area
 
-        
-        #orientation (optional)
+        # orientation (optional)
         if self.add_orientation:
+            # Batch fetch backbone coordinates: single query instead of 3*N queries
+            # Get unique (chain, resSeq) pairs to avoid redundant queries
+            residue_keys = set()
+            for (chain, resseq, resname, atomid, atomname) in node_keys:
+                residue_keys.add((chain, int(resseq)))
+
+            # Fetch all backbone atoms in one query per residue
+            backbone_coords = {}  # (chain, resSeq) -> {'CA': xyz, 'C': xyz, 'N': xyz}
+            for chain, resseq in residue_keys:
+                raw = db.get("name,x,y,z", chainID=chain, resSeq=resseq)
+                coords = {}
+                for row in raw:
+                    name = row[0].decode() if isinstance(row[0], (bytes, bytearray)) else row[0]
+                    if name in ('CA', 'C', 'N'):
+                        coords[name] = [row[1], row[2], row[3]]
+                backbone_coords[(chain, resseq)] = coords
+
+            # Build position arrays in node order
             pos_CA, pos_C, pos_N = [], [], []
-            for (chain, resseq, resname, atomid, atomname), _ in self.nx.nodes(data=True):
-                sel = dict(chainID=chain, resSeq=int(resseq))
-                pos_CA.append(db.get("x,y,z", name="CA", **sel)[0])
-                pos_C.append(db.get("x,y,z", name="C", **sel)[0])
-                pos_N.append(db.get("x,y,z", name="N", **sel)[0])
+            for (chain, resseq, resname, atomid, atomname) in node_keys:
+                coords = backbone_coords.get((chain, int(resseq)), {})
+                pos_CA.append(coords.get('CA', [0.0, 0.0, 0.0]))
+                pos_C.append(coords.get('C', [0.0, 0.0, 0.0]))
+                pos_N.append(coords.get('N', [0.0, 0.0, 0.0]))
 
             pos_CA = torch.tensor(pos_CA, dtype=torch.float)
             pos_C = torch.tensor(pos_C, dtype=torch.float)
@@ -336,8 +355,6 @@ class AtomGraph(Graph):
             orient = compute_edge_orientation(pos_CA, pos_C, pos_N, ei_t).cpu().numpy()
             for idx, (u, v) in enumerate(self.nx.edges):
                 self.nx.edges[u, v]["orientation"] = orient[idx]
-
-
 
         from tools.contacts_dr2 import add_residue_contacts_atomgraph
         add_residue_contacts_atomgraph(self, db)
@@ -423,21 +440,39 @@ class AtomGraph(Graph):
     def _get_internal_edges_chain(self, nodes, db, cutoff):
         """
         Find intra-chain edges and minimal atom-atom distance between residue pairs.
+        Pre-fetches all coordinates to avoid O(n²) db.get() calls.
         """
         nn = len(nodes)
+        if nn == 0:
+            return [], []
+
+        # Pre-fetch all atom coordinates for this chain's nodes (O(n) queries instead of O(n²))
+        node_coords = {}
+        for node in nodes:
+            xyz = np.array(db.get("x,y,z", chainID=node[0], resSeq=node[1], serial=node[-2]))
+            node_coords[node] = xyz
+
         edges, dist = [], []
+        cutoff_sq = cutoff ** 2
+
         for i1 in range(nn):
-            xyz1 = np.array(db.get("x,y,z", chainID=nodes[i1][0], resSeq=nodes[i1][1], serial=nodes[i1][-2]))
+            xyz1 = node_coords[nodes[i1]]
+            # Pre-compute terms for vectorized distance
+            xyz1_sq = np.sum(xyz1**2, axis=1)[:, None]
+
             for i2 in range(i1 + 1, nn):
-                xyz2 = np.array(db.get("x,y,z", chainID=nodes[i2][0], resSeq=nodes[i2][1], serial=nodes[i2][-2]))
+                xyz2 = node_coords[nodes[i2]]
+                # Squared distance matrix between atoms of node i1 and i2
                 d2 = (
                     -2 * np.dot(xyz1, xyz2.T)
-                    + np.sum(xyz1**2, axis=1)[:, None]
+                    + xyz1_sq
                     + np.sum(xyz2**2, axis=1)
                 )
-                if np.any(d2 < cutoff**2):
+                min_d2 = np.min(d2)
+                if min_d2 < cutoff_sq:
                     edges.append((nodes[i1], nodes[i2]))
-                    dist.append(np.sqrt(np.min(d2)))
+                    dist.append(np.sqrt(min_d2))
+
         return edges, dist
     
     def onehot(self, idx, size):
