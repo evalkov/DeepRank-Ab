@@ -162,6 +162,38 @@ trap cleanup_monitor EXIT
 start_monitor
 
 # ============================================================
+# VORONOTA / BSA BACKEND CONFIGURATION
+# ============================================================
+# USE_VORONOTA_LT: 0 = legacy voronota (default, accurate), 1 = voronota-lt (fast)
+# USE_FREESASA:    1 = freesasa (default, validated), 0 = voronota-lt (fast)
+export USE_VORONOTA_LT="${USE_VORONOTA_LT:-0}"
+export USE_FREESASA="${USE_FREESASA:-1}"
+
+# Locate voronota binary and get version
+VORONOTA_DIR="${DEEPRANK_ROOT}/src/tools/voronota"
+if [[ "${USE_VORONOTA_LT}" == "0" ]]; then
+  VORONOTA_BIN="${VORONOTA_DIR}/voronota"
+  VORONOTA_TYPE="legacy, additive tessellation"
+else
+  VORONOTA_BIN="${VORONOTA_DIR}/voronota-lt"
+  VORONOTA_TYPE="radical tessellation"
+fi
+
+# Extract version number (e.g., "Voronota version 1.28.4054" -> "1.28.4054")
+VORONOTA_VERSION="unknown"
+if [[ -x "${VORONOTA_BIN}" ]]; then
+  VORONOTA_VERSION=$("${VORONOTA_BIN}" 2>&1 | head -1 | sed -n 's/.*version \([0-9.]*\).*/\1/p')
+  [[ -z "${VORONOTA_VERSION}" ]] && VORONOTA_VERSION="unknown"
+fi
+VORONOTA_BACKEND="$(basename "${VORONOTA_BIN}") ${VORONOTA_VERSION} (${VORONOTA_TYPE})"
+
+if [[ "${USE_FREESASA}" == "1" ]]; then
+  BSA_BACKEND="freesasa"
+else
+  BSA_BACKEND="voronota-lt"
+fi
+
+# ============================================================
 # SHARD PARAMETER STAMP (uniquely defines sharding scheme)
 # ============================================================
 PARAM_STAMP=$(
@@ -174,6 +206,8 @@ MAX_PER_SHARD=${MAX_PER_SHARD}
 HEAVY=${HEAVY}
 LIGHT=${LIGHT}
 ANTIGEN=${ANTIGEN}
+VORONOTA=${VORONOTA_BACKEND}
+BSA=${BSA_BACKEND}
 EOF
 )
 
@@ -267,6 +301,8 @@ echo "[StageA] PDB_ROOT=${PDB_ROOT}"
 echo "[StageA] SHARD_LIST_DIR=${SHARD_LIST_DIR}"
 echo "[StageA] SHARD_ID=${SHARD_ID} (task ${TASK} / ${N_SHARDS})"
 echo "[StageA] CHAINS heavy=${HEAVY} light=${LIGHT} antigen=${ANTIGEN}"
+echo "[StageA] VORONOTA=${VORONOTA_BACKEND}"
+echo "[StageA] BSA=${BSA_BACKEND}"
 echo "[StageA] CORES=${NUM_CORES}"
 echo "[StageA] METRICS prefix=${PREFIX} interval=${COMPUTE_METRICS_INTERVAL}s dir=${COMPUTE_METRICS_DIR}"
 
