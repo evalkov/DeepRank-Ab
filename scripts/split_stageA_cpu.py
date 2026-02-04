@@ -82,11 +82,18 @@ def split_models_if_ensemble(pdb_path: Path, out_dir: Path) -> List[Path]:
     return saved
 
 def chain_sequence_from_pdb(pdb_path: Path, chain_id: str) -> str:
+    """Legacy function - parses PDB from file. Use _chain_sequence_from_model for efficiency."""
     if is_missing_chain(chain_id):
         return ""
     parser = PDBParser(QUIET=True)
     struct = parser.get_structure(pdb_path.stem, str(pdb_path))
     model = struct[0]
+    return _chain_sequence_from_model(model, chain_id)
+
+def _chain_sequence_from_model(model, chain_id: str) -> str:
+    """Extract sequence from an already-parsed model (avoids re-parsing PDB)."""
+    if is_missing_chain(chain_id):
+        return ""
     if chain_id not in model:
         return ""
     chain = model[chain_id]
@@ -116,9 +123,10 @@ def build_merged_structure(
     struct = parser.get_structure(pdb_path.stem, str(pdb_path))
     model_in = struct[0]
 
-    seqH = chain_sequence_from_pdb(pdb_path, heavy_chain_id)
-    seqL = "" if is_missing_chain(light_chain_id) else chain_sequence_from_pdb(pdb_path, light_chain_id)
-    seqAg = chain_sequence_from_pdb(pdb_path, antigen_chain_id)
+    # Extract sequences from already-parsed model (avoids 3 redundant file parses)
+    seqH = _chain_sequence_from_model(model_in, heavy_chain_id)
+    seqL = _chain_sequence_from_model(model_in, light_chain_id)
+    seqAg = _chain_sequence_from_model(model_in, antigen_chain_id)
 
     if heavy_chain_id not in model_in:
         raise ValueError(f"{pdb_path.name}: heavy chain '{heavy_chain_id}' not found")
