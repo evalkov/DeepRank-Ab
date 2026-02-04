@@ -77,34 +77,39 @@ def compute_nonbonded(atoms: List[Atom], ff: AtomicForcefield):
     D = distance_matrix(coords, coords)
     np.fill_diagonal(D, np.inf)
 
+    # Cache force field lookups - same (res_name, atom_name) pairs appear many times
+    charge_cache = {}
+    vdw_cache = {}
+
+    def get_charge_cached(res_name, atom_name, all_atom_names):
+        key = (res_name, atom_name)
+        if key not in charge_cache:
+            charge_cache[key] = ff.get_charge(res_name, atom_name, all_atom_names)
+        return charge_cache[key]
+
+    def get_vdw_cached(res_name, atom_name, all_atom_names):
+        key = (res_name, atom_name)
+        if key not in vdw_cache:
+            vdw_cache[key] = ff.get_vanderwaals(res_name, atom_name, all_atom_names)
+        return vdw_cache[key]
+
     # electrostatics: q_i q_j / (epsilon * r_ij)
-    charges = [ff.get_charge(a.res_name, a.atom_name, a.all_atom_names) for a in atoms]
+    charges = [get_charge_cached(a.res_name, a.atom_name, a.all_atom_names) for a in atoms]
     q = np.array(charges, dtype=float)
     E_elec = np.outer(q, q) * COULOMB_CONSTANT / (EPSILON0 * D)
 
     # LJ main terms via Lorentz-Berthelot mixing
-    sig_main = np.array([
-        ff.get_vanderwaals(a.res_name, a.atom_name, a.all_atom_names).sigma_main
-        for a in atoms
-    ], dtype=float)
-    eps_main = np.array([
-        ff.get_vanderwaals(a.res_name, a.atom_name, a.all_atom_names).epsilon_main
-        for a in atoms
-    ], dtype=float)
+    vdw_params = [get_vdw_cached(a.res_name, a.atom_name, a.all_atom_names) for a in atoms]
+    sig_main = np.array([v.sigma_main for v in vdw_params], dtype=float)
+    eps_main = np.array([v.epsilon_main for v in vdw_params], dtype=float)
     mean_sig = 0.5 * (sig_main[:, None] + sig_main[None, :])          # arithmetic mean σ
     geom_eps = np.sqrt(eps_main[:, None] * eps_main[None, :])          # geometric mean ε
     r6 = (mean_sig / D) ** 6
     E_vdw = 4 * geom_eps * (r6**2 - r6)
 
-    # LJ 1–4 parameters
-    sig_14 = np.array([
-        ff.get_vanderwaals(a.res_name, a.atom_name, a.all_atom_names).sigma_14
-        for a in atoms
-    ], dtype=float)
-    eps_14 = np.array([
-        ff.get_vanderwaals(a.res_name, a.atom_name, a.all_atom_names).epsilon_14
-        for a in atoms
-    ], dtype=float)
+    # LJ 1–4 parameters (reuse cached vdw_params)
+    sig_14 = np.array([v.sigma_14 for v in vdw_params], dtype=float)
+    eps_14 = np.array([v.epsilon_14 for v in vdw_params], dtype=float)
     mean_sig14 = 0.5 * (sig_14[:, None] + sig_14[None, :])
     geom_eps14 = np.sqrt(eps_14[:, None] * eps_14[None, :])
     r614 = (mean_sig14 / D) ** 6

@@ -92,10 +92,11 @@ class Graph(object):
         grp.create_dataset("edges", data=np.array(directed_if, dtype="S"))
         grp.create_dataset("internal_edges", data=np.array(directed_int, dtype="S"))
 
-        # integer indices
+        # integer indices - use dict for O(1) lookup instead of O(n) list.index()
         node_key = list(self.nx.nodes)
-        idx_if = [[node_key.index(u), node_key.index(v)] for u, v in directed_if]
-        idx_int = [[node_key.index(u), node_key.index(v)] for u, v in directed_int]
+        node_to_idx = {node: i for i, node in enumerate(node_key)}
+        idx_if = [[node_to_idx[u], node_to_idx[v]] for u, v in directed_if]
+        idx_int = [[node_to_idx[u], node_to_idx[v]] for u, v in directed_int]
         grp.create_dataset("edge_index", data=np.array(idx_if, dtype=np.int32))
         grp.create_dataset("internal_edge_index", data=np.array(idx_int, dtype=np.int32))
 

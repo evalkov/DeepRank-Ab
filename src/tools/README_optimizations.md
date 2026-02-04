@@ -137,6 +137,71 @@ for u, v in graph.nx.edges:
 
 ---
 
+## 5. HDF5 Edge Index Writing
+
+**File:** `Graph.py`
+
+**Problem:** Converting node tuples to integer indices for HDF5 storage used `list.index()`.
+
+```python
+# Before: O(n) per edge = O(E×n) total
+node_key = list(self.nx.nodes)
+idx_if = [[node_key.index(u), node_key.index(v)] for u, v in directed_if]
+idx_int = [[node_key.index(u), node_key.index(v)] for u, v in directed_int]
+```
+
+**Solution:** Build a dictionary for O(1) lookup.
+
+```python
+# After: O(1) per edge = O(E) total
+node_key = list(self.nx.nodes)
+node_to_idx = {node: i for i, node in enumerate(node_key)}
+idx_if = [[node_to_idx[u], node_to_idx[v]] for u, v in directed_if]
+idx_int = [[node_to_idx[u], node_to_idx[v]] for u, v in directed_int]
+```
+
+**Complexity:** O(E×n) → O(E)
+
+---
+
+## 6. Force Field Lookup Caching
+
+**Files:** `tools/contacts_dr2.py`, `tools/contacts_dr2_res.py`
+
+**Problem:** Same (residue_name, atom_name) pairs looked up repeatedly for charge and van der Waals parameters.
+
+```python
+# Before: N lookups even when only ~50 unique atom types
+charges = [ff.get_charge(a.res_name, a.atom_name, ...) for a in atoms]
+sig_main = np.array([ff.get_vanderwaals(...).sigma_main for a in atoms])
+eps_main = np.array([ff.get_vanderwaals(...).epsilon_main for a in atoms])
+sig_14 = np.array([ff.get_vanderwaals(...).sigma_14 for a in atoms])
+eps_14 = np.array([ff.get_vanderwaals(...).epsilon_14 for a in atoms])
+# 5 × N lookups total
+```
+
+**Solution:** Cache lookups by (res_name, atom_name) key.
+
+```python
+# After: ~U lookups where U = unique atom types (~50)
+charge_cache = {}
+vdw_cache = {}
+
+def get_charge_cached(res_name, atom_name, all_atom_names):
+    key = (res_name, atom_name)
+    if key not in charge_cache:
+        charge_cache[key] = ff.get_charge(res_name, atom_name, all_atom_names)
+    return charge_cache[key]
+
+# Single vdw lookup per unique type, reuse for all 4 parameters
+vdw_params = [get_vdw_cached(a.res_name, a.atom_name, ...) for a in atoms]
+sig_main = np.array([v.sigma_main for v in vdw_params])
+```
+
+**Complexity:** O(5×N) lookups → O(N + U) lookups, where U << N
+
+---
+
 ## Summary Table
 
 | Component | Location | Before | After | Speedup Factor |
@@ -148,8 +213,11 @@ for u, v in graph.nx.edges:
 | Internal edges | AtomGraph.py:440-476 | O(n²) queries | O(n) queries | ~n |
 | Internal edges | ResidueGraph.py:314-340 | O(n²) queries | O(n) queries | ~n |
 | Contact features | contacts_dr2.py:206-251 | O(N×E) | O(N+E) | ~N |
+| HDF5 edge indexing | Graph.py:96-100 | O(E×n) | O(E) | ~n |
+| Force field lookups | contacts_dr2.py, contacts_dr2_res.py | O(N) lookups | O(U) lookups | ~N/U |
 
 Where:
+- U = number of unique (residue_name, atom_name) pairs (~50 for typical proteins)
 - N = number of atoms
 - n = number of nodes (residues or atoms depending on graph type)
 - E = number of edges
