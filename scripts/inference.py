@@ -527,6 +527,9 @@ def add_embedding(work_dir: Path, hdf5_path: str):
             residues = f[mol]["nodes"][()]
             emb = torch.zeros(len(residues), 1)
 
+            # Cache loaded .pt files to avoid repeated loading for same chain
+            pt_cache: dict = {}
+
             for i, res in enumerate(residues):
                 chain, idx = res[0].decode(), int(res[1].decode())
                 pt = _resolve_pt(mol, chain)
@@ -536,9 +539,14 @@ def add_embedding(work_dir: Path, hdf5_path: str):
                         f"Missing embedding: {pt} (mol={mol}, chain={chain})"
                     )
 
-                data = torch.load(pt, map_location="cpu")
-                # Your config uses REPR_LAYERS=[33] and INCLUDE includes per_tok
-                vecs = data["representations"][33]
+                # Load from cache or file
+                pt_key = str(pt)
+                if pt_key not in pt_cache:
+                    data = torch.load(pt, map_location="cpu")
+                    # Your config uses REPR_LAYERS=[33] and INCLUDE includes per_tok
+                    pt_cache[pt_key] = data["representations"][33]
+
+                vecs = pt_cache[pt_key]
                 if idx < 1 or idx > vecs.shape[0]:
                     raise IndexError(
                         f"Residue index out of bounds for {pt}: idx={idx}, len={vecs.shape[0]}"
