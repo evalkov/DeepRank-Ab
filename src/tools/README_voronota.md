@@ -181,6 +181,28 @@ CXX_FLAGS="-std=c++14 -O3 ${ARCH_FLAG} -qopenmp -qopenmp-link=static"
 
 ## Performance Tuning
 
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VORO_PROCESSORS` | 1 | OpenMP threads per voronota-lt subprocess |
+| `VORO_CHAIN_PARALLEL` | 1 | Run chain A/B SAS in parallel (set to 0 for HPC) |
+| `VORONOTA_LT` | (auto) | Path to voronota-lt binary |
+
+### HPC Configuration (many workers)
+
+For maximum throughput with many Python workers (e.g., 48-core nodes):
+
+```bash
+export VORO_PROCESSORS=1        # Single-threaded voronota-lt
+export VORO_CHAIN_PARALLEL=0    # Sequential chain SAS (avoids 2× oversubscription)
+export OMP_NUM_THREADS=1        # Disable OpenMP threading
+```
+
+This allows you to use all 48 cores as Python workers without oversubscription:
+- Without `VORO_CHAIN_PARALLEL=0`: 48 workers × 2 chains = 96 peak processes
+- With `VORO_CHAIN_PARALLEL=0`: 48 workers × 1 = 48 peak processes
+
 ### Processor Count
 
 Adjust `processors` parameter based on your system:

@@ -8,6 +8,14 @@ Key goals:
     * For throughput (many Python worker processes), you typically want processors=1
       to avoid oversubscription (e.g., 48 workers × 4 threads = 192 runnable threads).
 
+Environment variables:
+- VORO_PROCESSORS: OpenMP threads per voronota-lt call (default: 1)
+- VORO_CHAIN_PARALLEL: Run chain A/B SAS in parallel (default: 1)
+    * Set to 0 for HPC with many workers to avoid oversubscription
+    * With 48 workers and VORO_CHAIN_PARALLEL=1: peak 96 subprocesses
+    * With 48 workers and VORO_CHAIN_PARALLEL=0: peak 48 subprocesses
+- VORONOTA_LT: Path to voronota-lt binary (optional)
+
 This module provides:
 - VoroContacts: unified engine
 - VoronotaAreas: drop-in compatibility wrapper
@@ -38,6 +46,18 @@ def _env_int(name: str, default: int) -> int:
         return max(1, int(v))
     except ValueError:
         return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Read boolean from environment variable (0/1, true/false, yes/no)."""
+    v = os.environ.get(name, "").strip().lower()
+    if not v:
+        return default
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return default
 
 
 def _pick_header_index(header: Iterable[str], candidates: Iterable[str]) -> Optional[int]:
@@ -157,15 +177,20 @@ class VoroContacts:
 
     def _run_chain_sas_parallel(self) -> None:
         """
-        Compute residue-level SAS per chain in parallel subprocesses.
+        Compute residue-level SAS per chain.
 
-        Important: if your outer pipeline is already multiprocessing heavily,
-        you usually want VORO_PROCESSORS=1 to avoid oversubscription. This function
-        still uses two subprocesses (one per chain) but each can be single-threaded.
+        Parallelism is controlled by VORO_CHAIN_PARALLEL env var:
+          - VORO_CHAIN_PARALLEL=1 (default): Run chain A and B in parallel (2 subprocesses)
+          - VORO_CHAIN_PARALLEL=0: Run sequentially (1 subprocess at a time)
+
+        For HPC with many Python workers, set VORO_CHAIN_PARALLEL=0 to avoid
+        oversubscription (e.g., 48 workers × 2 chains = 96 concurrent processes).
         """
+        parallel = _env_bool("VORO_CHAIN_PARALLEL", default=True)
+
         def compute_chain_sas(chain_id: str) -> Tuple[str, Dict[ResidueKey, float]]:
             # For chain SAS, you can optionally split processors; but for HPC throughput
-            # it’s usually best to keep this 1 unless you intentionally reduce Python workers.
+            # it's usually best to keep this 1 unless you intentionally reduce Python workers.
             chain_procs = max(1, self.processors // 2) if self.processors > 1 else 1
 
             cmd = [
@@ -185,10 +210,18 @@ class VoroContacts:
             return chain_id, self._parse_cells_residue(result.stdout)
 
         self.chain_sas = {}
-        with ThreadPoolExecutor(max_workers=max(1, len(self.chain_ids))) as ex:
-            futures = [ex.submit(compute_chain_sas, c) for c in self.chain_ids]
-            for fut in as_completed(futures):
-                chain_id, sas_map = fut.result()
+
+        if parallel:
+            # Run chain SAS calculations in parallel (2 concurrent subprocesses)
+            with ThreadPoolExecutor(max_workers=max(1, len(self.chain_ids))) as ex:
+                futures = [ex.submit(compute_chain_sas, c) for c in self.chain_ids]
+                for fut in as_completed(futures):
+                    chain_id, sas_map = fut.result()
+                    self.chain_sas[chain_id] = sas_map
+        else:
+            # Run chain SAS calculations sequentially (1 subprocess at a time)
+            for chain_id in self.chain_ids:
+                _, sas_map = compute_chain_sas(chain_id)
                 self.chain_sas[chain_id] = sas_map
 
     # ----------------------------
