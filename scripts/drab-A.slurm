@@ -97,7 +97,10 @@ PY
 
   # If nvidia-smi exists, count GPUs; otherwise: CPU node, return empty.
   if command -v nvidia-smi >/dev/null 2>&1; then
-    n="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+    n="$(nvidia-smi -L 2>/dev/null | wc -l | xargs || echo 0)"
+    # Ensure n is a single integer
+    n="${n%%[!0-9]*}"
+    [[ -z "${n}" ]] && n=0
     if [[ "${n}" -ge 1 ]]; then
       python3 - <<PY
 n=int("${n}")
