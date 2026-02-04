@@ -171,7 +171,7 @@ class GraphHDF5(object):
         # --- embeddings are optional ---
         self.embedding_path = embedding_path
         if self.embedding_path is None:
-            print("no embeddings path; skipping", flush=True)
+            pass
         
         self.antigen_chainid = antigen_chainid
         self.use_regions = use_regions

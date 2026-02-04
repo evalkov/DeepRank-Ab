@@ -254,7 +254,6 @@ def annotate_folder(folder: Path, output_dir: Path, fasta_file: Path = None, ant
     with open(out_file, "w") as f:
         json.dump(all_annotations, f, indent=2)
 
-    print(f"Annotations written to {out_file}")
 
 
 def _annotate_single_wrapper(args):
@@ -485,7 +484,6 @@ def annotate_folder_one_by_one_mp(
     with open(out_file, "w") as f:
         json.dump(all_annotations, f, indent=2)
 
-    print(f"Annotations written to {out_file}")
 
 
 def annotate_folder_one_by_one_mp_single_fasta(
@@ -523,5 +521,4 @@ def annotate_folder_one_by_one_mp_single_fasta(
     with open(out_file, "w") as f:
         json.dump(all_annotations, f, indent=2)
 
-    print(f"Annotations written to {out_file}")
 
