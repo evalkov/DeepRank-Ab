@@ -208,9 +208,10 @@ fi
 
 # Extract version number (e.g., "Voronota version 1.28.4054" -> "1.28.4054")
 # Note: voronota exits non-zero when run without args, so use || true
-VORONOTA_VERSION=$("${VORONOTA_BIN}" 2>&1 || true | head -1 | sed -n 's/.*version \([0-9.]*\).*/\1/p')
+VORONOTA_VERSION=$("${VORONOTA_BIN}" 2>&1 || true)
+VORONOTA_VERSION=$(echo "${VORONOTA_VERSION}" | head -1 | sed -n 's/.*version \([0-9.]*\).*/\1/p')
 [[ -z "${VORONOTA_VERSION}" ]] && VORONOTA_VERSION="unknown"
-VORONOTA_BACKEND="$(basename "${VORONOTA_BIN}") ${VORONOTA_VERSION} (${VORONOTA_TYPE})"
+VORONOTA_BACKEND="$(basename "${VORONOTA_BIN}") v${VORONOTA_VERSION} (${VORONOTA_TYPE})"
 
 if [[ "${USE_FREESASA}" == "1" ]]; then
   BSA_BACKEND="freesasa"
