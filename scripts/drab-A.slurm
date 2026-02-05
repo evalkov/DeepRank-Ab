@@ -214,7 +214,9 @@ if [[ ! -x "${VORONOTA_BIN}" ]]; then
   exit 1
 fi
 
-# Extract version number (e.g., "Voronota version 1.28.4054" -> "1.28.4054")
+# Extract version number
+# Legacy voronota: "Voronota version 1.28.4054" -> "1.28.4054"
+# voronota-lt: first line is usage info, not version; use --version flag
 # Note: voronota exits non-zero when run without args, so use || true
 echo "[DEBUG] VORONOTA_BIN=${VORONOTA_BIN}"
 echo "[DEBUG] Binary exists: $(test -f "${VORONOTA_BIN}" && echo yes || echo no)"
@@ -222,7 +224,14 @@ echo "[DEBUG] Binary executable: $(test -x "${VORONOTA_BIN}" && echo yes || echo
 echo "[DEBUG] ldd check:"
 ldd "${VORONOTA_BIN}" 2>&1 | head -5 || true
 echo "[DEBUG] Running voronota..."
-VORONOTA_RAW=$("${VORONOTA_BIN}" 2>&1 | head -1 || true)
+if [[ "${USE_VORONOTA_LT}" == "1" ]]; then
+  # voronota-lt: no-args output starts with subcommands, not version
+  # --help first line: "Voronota-LT version 1.1"
+  VORONOTA_RAW=$("${VORONOTA_BIN}" --help 2>&1 | head -1 || true)
+else
+  # Legacy voronota: no-args first line: "Voronota version 1.28.4054"
+  VORONOTA_RAW=$("${VORONOTA_BIN}" 2>&1 | head -1 || true)
+fi
 echo "[DEBUG] VORONOTA_RAW='${VORONOTA_RAW}'"
 VORONOTA_VERSION=$(echo "${VORONOTA_RAW}" | awk '{print $3}')
 echo "[DEBUG] VORONOTA_VERSION='${VORONOTA_VERSION}'"
