@@ -476,53 +476,70 @@ def run_sharded_embeddings_subprocess(
 # Embedding injection
 # ----------------------------
 def inject_embeddings_from_parts(graph_h5: Path, part_h5s: List[Path], label_to_shard: Dict[str, int]) -> Tuple[int, int]:
-    part_handles = [h5py.File(p, "r") for p in part_h5s]
+    """
+    Inject ESM embeddings into graph HDF5.
+
+    Optimized version: pre-loads all embeddings into memory at startup for
+    vectorized access, avoiding repeated HDF5 lookups per residue.
+    """
+    import numpy as np
+
+    # Pre-load all embeddings into a single dict (label -> numpy array)
+    # This avoids repeated HDF5 lookups and enables vectorized injection
+    all_embeddings: Dict[str, np.ndarray] = {}
+
+    for part_h5 in part_h5s:
+        with h5py.File(part_h5, "r") as h:
+            if "scalar" not in h:
+                continue
+            scalar_group = h["scalar"]
+            for label in scalar_group.keys():
+                all_embeddings[label] = scalar_group[label][()]
+
     missing_labels = 0
     oob = 0
-    try:
-        scalar_groups = [h["scalar"] for h in part_handles]
 
-        with h5py.File(graph_h5, "r+") as f:
-            for mol in f.keys():
-                residues = f[mol]["nodes"][()]
-                emb = torch.zeros((len(residues), 1), dtype=torch.float32)
-                cache: Dict[str, object] = {}
+    with h5py.File(graph_h5, "r+") as f:
+        for mol in f.keys():
+            residues = f[mol]["nodes"][()]
+            n_residues = len(residues)
+            emb = np.zeros((n_residues, 1), dtype=np.float32)
 
-                for i, res in enumerate(residues):
-                    chain = res[0].decode() if isinstance(res[0], (bytes, bytearray)) else str(res[0])
-                    resid = int(res[1].decode()) if isinstance(res[1], (bytes, bytearray)) else int(res[1])
+            # Decode chain and resid arrays once (vectorized where possible)
+            chains = []
+            resids = []
+            for res in residues:
+                chain = res[0].decode() if isinstance(res[0], (bytes, bytearray)) else str(res[0])
+                resid = int(res[1].decode()) if isinstance(res[1], (bytes, bytearray)) else int(res[1])
+                chains.append(chain)
+                resids.append(resid)
 
-                    label = f"{mol}.{chain}"
-                    shard = label_to_shard.get(label, None)
-                    if shard is None or shard < 0 or shard >= len(scalar_groups):
-                        missing_labels += 1
-                        continue
+            # Group residues by chain for batch lookup
+            chain_to_indices: Dict[str, List[Tuple[int, int]]] = {}
+            for i, (chain, resid) in enumerate(zip(chains, resids)):
+                chain_to_indices.setdefault(chain, []).append((i, resid))
 
-                    if label not in cache:
-                        g = scalar_groups[shard]
-                        if label not in g:
-                            missing_labels += 1
-                            continue
-                        cache[label] = g[label][()]
+            # Inject embeddings per chain (vectorized)
+            for chain, idx_resid_list in chain_to_indices.items():
+                label = f"{mol}.{chain}"
+                if label not in all_embeddings:
+                    missing_labels += len(idx_resid_list)
+                    continue
 
-                    arr = cache[label]
+                arr = all_embeddings[label]
+                arr_len = len(arr)
+
+                for i, resid in idx_resid_list:
                     j = resid - 1
-                    if 0 <= j < len(arr):
+                    if 0 <= j < arr_len:
                         emb[i, 0] = float(arr[j])
                     else:
                         oob += 1
 
-                grp = f[mol].require_group("node_data")
-                if "embedding" in grp:
-                    del grp["embedding"]
-                grp.create_dataset("embedding", data=emb.numpy())
-
-    finally:
-        for h in part_handles:
-            try:
-                h.close()
-            except Exception:
-                pass
+            grp = f[mol].require_group("node_data")
+            if "embedding" in grp:
+                del grp["embedding"]
+            grp.create_dataset("embedding", data=emb)
 
     return missing_labels, oob
 

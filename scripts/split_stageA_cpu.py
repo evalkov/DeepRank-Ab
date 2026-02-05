@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from time import perf_counter
@@ -333,9 +334,15 @@ def run_stageA_one_shard(
     if not inputs:
         raise SystemExit(f"{shard_list}: empty")
 
-    # Stage PDBs to local
-    for p in inputs:
-        shutil.copy2(p, pdbs_dir / p.name)
+    # Stage PDBs to local (parallel I/O for network filesystems)
+    def _copy_pdb(src: Path) -> Path:
+        dst = pdbs_dir / src.name
+        shutil.copy2(src, dst)
+        return dst
+
+    max_copy_workers = min(16, len(inputs)) if inputs else 1
+    with ThreadPoolExecutor(max_workers=max_copy_workers) as ex:
+        list(ex.map(_copy_pdb, inputs))
 
     staged = sorted(pdbs_dir.glob("*.pdb"))
 
