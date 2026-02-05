@@ -11,7 +11,7 @@ SLURM_FILE="${1:-stageB_gpu.slurm}"
 SHARDS_PER_TASK="${SHARDS_PER_TASK:-20}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-8}"
 
-SHARDS_ROOT="${RUN_ROOT}/exchange/shards"
+SHARDS_ROOT="${RUN_ROOT}/shards"
 N_SHARDS="$(find "${SHARDS_ROOT}" -maxdepth 1 -type d -name 'shard_*' 2>/dev/null | wc -l | tr -d ' ')"
 if (( N_SHARDS <= 0 )); then
   echo "No shards found in ${SHARDS_ROOT}" >&2

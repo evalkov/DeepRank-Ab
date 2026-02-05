@@ -1,15 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=drab-B
-#SBATCH --partition=gpu
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:l40s:4
-#SBATCH --mem=128G
-#SBATCH --time=02:00:00
-#SBATCH --array=0-7%8
-#SBATCH --output=%x_%A_%a.log
-#SBATCH --error=%x_%A_%a.err
+# All SBATCH directives are set by run_pipeline.py via CLI args.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -34,7 +24,7 @@ SCRIPT="${DEEPRANK_ROOT}/scripts/split_stageB_gpu.py"
 COLLECT_COMPUTE_METRICS="${COLLECT_COMPUTE_METRICS:-1}"
 COMPUTE_METRICS_INTERVAL="${COMPUTE_METRICS_INTERVAL:-2}"
 
-COMPUTE_METRICS_DIR="${RUN_ROOT}/exchange/compute_metrics"
+COMPUTE_METRICS_DIR="${RUN_ROOT}/compute_metrics"
 mkdir -p "${COMPUTE_METRICS_DIR}"
 
 MONITOR_SCRIPT="${MONITOR_SCRIPT:-${DEEPRANK_ROOT}/scripts/collect_compute_metrics.py}"
@@ -133,7 +123,7 @@ start_monitor
 # ============================================================
 # StageB shard selection
 # ============================================================
-SHARDS_ROOT="${RUN_ROOT}/exchange/shards"
+SHARDS_ROOT="${RUN_ROOT}/shards"
 N_SHARDS="$(find "${SHARDS_ROOT}" -maxdepth 1 -type d -name 'shard_*' 2>/dev/null | wc -l | tr -d ' ')"
 if (( N_SHARDS == 0 )); then
   echo "[StageB] No shards found in ${SHARDS_ROOT}"

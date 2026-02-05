@@ -206,7 +206,7 @@ def analyze_input(cfg: PipelineConfig) -> InputAnalysis:
 
 def count_existing_shards(cfg: PipelineConfig) -> int:
     """Count existing shard list files."""
-    shard_lists_dir = cfg.run_root / "exchange" / "shard_lists"
+    shard_lists_dir = cfg.run_root / "shard_lists"
     if not shard_lists_dir.is_dir():
         return 0
     return len(list(shard_lists_dir.glob("shard_*.lst")))
@@ -214,7 +214,7 @@ def count_existing_shards(cfg: PipelineConfig) -> int:
 
 def count_completed_stage_a(cfg: PipelineConfig) -> int:
     """Count completed Stage A shards."""
-    shards_dir = cfg.run_root / "exchange" / "shards"
+    shards_dir = cfg.run_root / "shards"
     if not shards_dir.is_dir():
         return 0
     return len(list(shards_dir.glob("shard_*/STAGEA_DONE")))
@@ -222,7 +222,7 @@ def count_completed_stage_a(cfg: PipelineConfig) -> int:
 
 def count_completed_stage_b(cfg: PipelineConfig) -> int:
     """Count completed Stage B predictions."""
-    preds_dir = cfg.run_root / "exchange" / "preds"
+    preds_dir = cfg.run_root / "preds"
     if not preds_dir.is_dir():
         return 0
     return len(list(preds_dir.glob("DONE_shard_*.ok")))
@@ -289,14 +289,29 @@ def build_sbatch_args(
     dependency: Optional[str] = None,
     job_name: Optional[str] = None,
 ) -> List[str]:
-    """Build sbatch arguments for a stage."""
+    """Build sbatch arguments for a stage.
+
+    All SBATCH directives are passed here on the CLI so that the .slurm
+    scripts contain no #SBATCH headers and cannot conflict.
+    """
     args = ["sbatch", "--parsable"]
+    args.extend(["--nodes", "1"])
+    args.extend(["--ntasks", "1"])
 
     if job_name:
         args.extend(["--job-name", job_name])
 
     if dependency:
         args.extend(["--dependency", f"afterok:{dependency}"])
+
+    # Log files go into {run_root}/logs/
+    log_dir = cfg.run_root / "logs"
+    if array_spec:
+        log_pat = str(log_dir / "%x_%A_%a")
+    else:
+        log_pat = str(log_dir / "%x_%j")
+    args.extend(["--output", f"{log_pat}.log"])
+    args.extend(["--error", f"{log_pat}.err"])
 
     if stage == "a" or stage == "a_shard":
         sa = cfg.stage_a
@@ -402,11 +417,21 @@ def run_sharding_only(cfg: PipelineConfig, dry_run: bool = False) -> Tuple[JobRe
     script = cfg.deeprank_root / "scripts" / "drab-A.slurm"
     env = build_env(cfg, "a_shard", MAKE_SHARDS_ONLY="1")
 
-    # Single task for sharding
-    args = build_sbatch_args(cfg, "a_shard", job_name="drab-A-shard")
-    # Override to single task, short time
-    args = [a for a in args if not a.startswith("--array")]
-    args.extend(["--time", "00:10:00"])  # Sharding is fast
+    # Single-element array so SLURM_ARRAY_TASK_ID=0 is set (script requires it)
+    args = build_sbatch_args(cfg, "a_shard", array_spec="0-0", job_name="drab-A-shard")
+    # Override to short time — sharding is fast
+    filtered = []
+    skip_next = False
+    for a in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "--time":
+            skip_next = True
+            continue
+        filtered.append(a)
+    filtered.extend(["--time", "00:10:00"])
+    args = filtered
 
     result = submit_job(args, script, env, dry_run, "A-SHARD")
     return result, analysis.estimated_shards
@@ -514,9 +539,10 @@ def run_pipeline_dynamic(
     results = []
     prev_job_id: Optional[str] = None
 
-    # Create run_root
+    # Create run_root and logs directory
     if not dry_run:
         cfg.run_root.mkdir(parents=True, exist_ok=True)
+        (cfg.run_root / "logs").mkdir(exist_ok=True)
 
     # Check for existing state
     existing_shards = count_existing_shards(cfg)

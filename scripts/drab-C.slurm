@@ -1,13 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=drab-C
-#SBATCH --partition=norm
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
-#SBATCH --time=02:00:00
-#SBATCH --output=%x_%j.log
-#SBATCH --error=%x_%j.err
+# All SBATCH directives are set by run_pipeline.py via CLI args.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -16,12 +8,12 @@ module purge >/dev/null 2>&1 || true
 module load gcc/12.4.0 >/dev/null 2>&1 || true
 module load deeprank-ab/latest >/dev/null 2>&1 || true
 
-: "${RUN_ROOT:?set RUN_ROOT to your run dir (contains exchange/)}"
+: "${RUN_ROOT:?set RUN_ROOT to your run dir}"
 : "${DEEPRANK_ROOT:?set DEEPRANK_ROOT (DeepRank-Ab repo root)}"
 
 RUN_ROOT="$(readlink -f "${RUN_ROOT}")"
-PRED_DIR="${RUN_ROOT}/exchange/preds"
-OUT_DIR="${RUN_ROOT}/exchange/summary"
+PRED_DIR="${RUN_ROOT}/preds"
+OUT_DIR="${RUN_ROOT}/summary"
 mkdir -p "${OUT_DIR}"
 
 MERGE_SCRIPT="${DEEPRANK_ROOT}/scripts/merge_pred_hdf5.py"
@@ -197,4 +189,53 @@ out_stats.write_text(json.dumps(stats, indent=2) + "\n")
 print(f"✓ Wrote: {out_tsv}")
 print(f"✓ Stats: {out_stats}")
 PY
+
+# ------------------------------------------------------------
+# 4) Compute metrics: summarize, plot, copy to run root
+# ------------------------------------------------------------
+METRICS_DIR="${RUN_ROOT}/compute_metrics"
+SUMMARIZE="${DEEPRANK_ROOT}/scripts/summarize_compute_metrics.py"
+PLOT_TS="${DEEPRANK_ROOT}/scripts/plot_compute_metrics_timeseries.py"
+PLOT_SUM="${DEEPRANK_ROOT}/scripts/plot_compute_metrics_summary.py"
+
+if [[ -d "${METRICS_DIR}" ]]; then
+  echo "[StageC] Running compute-metrics analysis..."
+
+  # Step 1: summarize (produces summary_*_ALL.tsv/json in METRICS_DIR)
+  if python3 "${SUMMARIZE}" "${METRICS_DIR}"; then
+    echo "[StageC] ✓ Metrics summarized"
+
+    # Find the aggregate TSV for the summary plot
+    AGG_TSV=$(ls -1t "${METRICS_DIR}"/summary_*_ALL.tsv 2>/dev/null | head -1 || true)
+
+    # Step 2: summary bar-chart PDF
+    if [[ -n "${AGG_TSV}" ]]; then
+      SUMMARY_PDF="${RUN_ROOT}/compute_metrics_summary.pdf"
+      if python3 "${PLOT_SUM}" "${AGG_TSV}" --out "${SUMMARY_PDF}"; then
+        echo "[StageC] ✓ Summary plot: ${SUMMARY_PDF}"
+      else
+        echo "[StageC] WARNING: summary plot failed (non-fatal)"
+      fi
+    fi
+
+    # Step 3: time-series PDF
+    TIMESERIES_PDF="${RUN_ROOT}/compute_metrics_timeseries.pdf"
+    if python3 "${PLOT_TS}" "${METRICS_DIR}" --out "${TIMESERIES_PDF}"; then
+      echo "[StageC] ✓ Time-series plot: ${TIMESERIES_PDF}"
+    else
+      echo "[StageC] WARNING: time-series plot failed (non-fatal)"
+    fi
+
+    # Copy aggregate tables to run root for convenience
+    for f in "${METRICS_DIR}"/summary_*_ALL.{tsv,json}; do
+      [[ -f "${f}" ]] && cp "${f}" "${RUN_ROOT}/" && echo "[StageC] ✓ Copied $(basename "${f}") -> ${RUN_ROOT}/"
+    done
+  else
+    echo "[StageC] WARNING: metrics summarization failed (non-fatal)"
+  fi
+else
+  echo "[StageC] No compute_metrics directory found; skipping metrics analysis"
+fi
+
+echo "[StageC] Done."
 

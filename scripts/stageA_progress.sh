@@ -23,7 +23,7 @@ Usage:
   $0 RUN_ROOT [--job JOB_ID] [--watch SECONDS] [--top N] [--rate-n N] [--no-slurm]
 
 Options:
-  --run-root   Path to run root containing exchange/
+  --run-root   Path to run root
   --job        Slurm job ID (array master) for compact state summary
   --watch      Refresh every N seconds (runs continuously)
   --top        Show top N most recent completions (default: ${TOP_N})
@@ -87,8 +87,8 @@ PY
   fi
 fi
 
-SHARD_LIST_DIR="${RUN_ROOT}/exchange/shard_lists"
-SHARDS_DIR="${RUN_ROOT}/exchange/shards"
+SHARD_LIST_DIR="${RUN_ROOT}/shard_lists"
+SHARDS_DIR="${RUN_ROOT}/shards"
 
 # -------------------- helpers --------------------
 pct() {

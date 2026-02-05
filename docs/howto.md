@@ -187,7 +187,7 @@ squeue -u $USER
 ls -la drab-A_*.log drab-B_*.log drab-C_*.log
 
 # Per-shard metadata
-cat /path/to/run_root/exchange/shards/shard_000000/meta_stageA.json
+cat /path/to/run_root/shards/shard_000000/meta_stageA.json
 ```
 
 ---
@@ -198,26 +198,30 @@ After the pipeline completes:
 
 ```
 run_root/
-├── exchange/
-│   ├── shard_lists/          # Stage A shard definitions
-│   │   ├── shard_000000.lst
-│   │   └── ...
-│   ├── shards/               # Stage A output (per-shard)
-│   │   ├── shard_000000/
-│   │   │   ├── graphs.h5
-│   │   │   ├── manifest.tsv.gz
-│   │   │   ├── meta_stageA.json
-│   │   │   └── STAGEA_DONE
-│   │   └── ...
-│   ├── preds/                # Stage B output (predictions)
-│   │   ├── pred_shard_000000.h5
-│   │   ├── DONE_shard_000000.ok
-│   │   └── ...
-│   ├── summary/              # Stage C output (merged)
-│   │   ├── predictions_merged.h5
-│   │   ├── all_predictions.tsv.gz
-│   │   └── stats.json
-│   └── compute_metrics/      # Resource usage metrics (if enabled)
+├── shard_lists/              # Stage A shard definitions
+│   ├── shard_000000.lst
+│   └── ...
+├── shards/                   # Stage A output (per-shard)
+│   ├── shard_000000/
+│   │   ├── graphs.h5
+│   │   ├── manifest.tsv.gz
+│   │   ├── meta_stageA.json
+│   │   └── STAGEA_DONE
+│   └── ...
+├── preds/                    # Stage B output (predictions)
+│   ├── pred_shard_000000.h5
+│   ├── DONE_shard_000000.ok
+│   └── ...
+├── summary/                  # Stage C output (merged)
+│   ├── predictions_merged.h5
+│   ├── all_predictions.tsv.gz
+│   └── stats.json
+├── compute_metrics/          # Resource usage metrics (if enabled)
+├── logs/                     # SLURM job logs
+├── compute_metrics_summary.pdf
+├── compute_metrics_timeseries.pdf
+├── summary_*_ALL.tsv
+├── summary_*_ALL.json
 └── pipeline_config.yaml      # Copy of config used
 ```
 
@@ -237,7 +241,7 @@ ls /path/to/pdb_root/**/*.pdb | head
 
 Stage A didn't complete successfully. Check:
 ```bash
-ls /path/to/run_root/exchange/shards/*/STAGEA_DONE | wc -l
+ls /path/to/run_root/shards/*/STAGEA_DONE | wc -l
 ```
 
 ### Out of memory

@@ -14,7 +14,7 @@ Three-stage pipeline for large-scale antibody-antigen binding affinity predictio
 
 ```bash
 # Set required environment variables
-export RUN_ROOT=/path/to/run_dir          # Output directory (will contain exchange/)
+export RUN_ROOT=/path/to/run_dir          # Output directory
 export PDB_ROOT=/path/to/pdbs             # Input PDB directory
 export DEEPRANK_ROOT=/path/to/DeepRank-Ab # Repository root
 export MODEL_PATH=/path/to/model.pt       # Trained model (for StageB)
@@ -35,27 +35,30 @@ After running, `RUN_ROOT` contains:
 
 ```
 RUN_ROOT/
-├── exchange/
-│   ├── shard_lists/          # StageA: PDB lists per shard
-│   │   ├── shard_000000.lst
-│   │   ├── shard_000001.lst
-│   │   └── ...
-│   ├── shards/               # StageA: processed shards
-│   │   ├── shard_000000/
-│   │   │   ├── graphs.h5
-│   │   │   ├── meta_stageA.json
-│   │   │   └── STAGEA_DONE
-│   │   └── ...
-│   ├── preds/                # StageB: predictions
-│   │   ├── pred_shard_000000.h5
-│   │   ├── DONE_shard_000000.ok
-│   │   └── ...
-│   ├── summary/              # StageC: final outputs
-│   │   ├── predictions_merged.h5
-│   │   ├── all_predictions.tsv.gz
-│   │   └── stats.json
-│   └── compute_metrics/      # Optional performance metrics
-└── ...
+├── shard_lists/              # StageA: PDB lists per shard
+│   ├── shard_000000.lst
+│   ├── shard_000001.lst
+│   └── ...
+├── shards/                   # StageA: processed shards
+│   ├── shard_000000/
+│   │   ├── graphs.h5
+│   │   ├── meta_stageA.json
+│   │   └── STAGEA_DONE
+│   └── ...
+├── preds/                    # StageB: predictions
+│   ├── pred_shard_000000.h5
+│   ├── DONE_shard_000000.ok
+│   └── ...
+├── summary/                  # StageC: final outputs
+│   ├── predictions_merged.h5
+│   ├── all_predictions.tsv.gz
+│   └── stats.json
+├── compute_metrics/          # Optional performance metrics
+├── logs/                     # SLURM job logs
+├── compute_metrics_summary.pdf
+├── compute_metrics_timeseries.pdf
+├── summary_*_ALL.tsv
+└── summary_*_ALL.json
 ```
 
 ## Stage A: Feature Extraction
@@ -240,17 +243,19 @@ Both StageA and StageB collect optional performance metrics.
 | `COLLECT_COMPUTE_METRICS` | `1` | Enable/disable collection |
 | `COMPUTE_METRICS_INTERVAL` | `2` | Sampling interval (seconds) |
 
-Metrics are saved to `RUN_ROOT/exchange/compute_metrics/`.
+Metrics are saved to `RUN_ROOT/compute_metrics/`.
 
-### Analysis Scripts
+Stage C automatically runs the analysis scripts and places output PDFs and tables in `RUN_ROOT/`.
+
+### Manual Analysis
 
 ```bash
 # Summarize metrics
-python scripts/summarize_compute_metrics.py /path/to/run/exchange/compute_metrics
+python scripts/summarize_compute_metrics.py /path/to/run/compute_metrics
 
 # Plot time series
-python scripts/plot_compute_metrics_timeseries.py /path/to/run/exchange/compute_metrics
+python scripts/plot_compute_metrics_timeseries.py /path/to/run/compute_metrics
 
-# Plot summary
-python scripts/plot_compute_metrics_summary.py /path/to/run/exchange/compute_metrics
+# Plot summary (uses the ALL.tsv produced by summarize)
+python scripts/plot_compute_metrics_summary.py /path/to/run/compute_metrics/summary_*_ALL.tsv
 ```

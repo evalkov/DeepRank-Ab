@@ -10,10 +10,10 @@ Stage B (GPU): for each shard produced by Stage A CPU:
 - Compute ESM scalar embeddings sharded across multiple GPUs
 - Inject embeddings into the graph HDF5
 - Run DeepRank-Ab inference
-- Publish predictions + DONE sentinel into exchange/preds
+- Publish predictions + DONE sentinel into preds/
 
 Assumed Stage A layout:
-$RUN_ROOT/exchange/shards/shard_000000/
+$RUN_ROOT/shards/shard_000000/
   graphs.h5
   manifest.tsv.gz
   meta_stageA.json
@@ -720,7 +720,7 @@ def main() -> int:
     ap.add_argument("--esm-scalar-dtype", default=os.environ.get("ESM_SCALAR_DTYPE", "float16"))
     ap.add_argument("--esm-gpus", type=int, default=int(os.environ.get("ESM_GPUS", "4")))
 
-    ap.add_argument("--run-root", required=False, default=".", help="Run directory containing exchange/")
+    ap.add_argument("--run-root", required=False, default=".", help="Run directory")
     ap.add_argument("--model-path", required=False, help="Path to DeepRank-Ab pretrained model")
     ap.add_argument("--device", default=("cuda" if torch.cuda.is_available() else "cpu"))
     ap.add_argument("--num-cores", type=int, default=getenv_int("NUM_CORES", 32))
@@ -732,9 +732,9 @@ def main() -> int:
     ap.add_argument("--start-index", type=int, default=-1, help="Start shard index (0-based)")
     ap.add_argument("--count", type=int, default=0, help="How many shards to process from start-index")
 
-    ap.add_argument("--shards-dir", default="", help="Override shards root (default: <run-root>/exchange/shards)")
-    ap.add_argument("--preds-dir", default="", help="Override preds root (default: <run-root>/exchange/preds)")
-    ap.add_argument("--logs-dir", default="", help="Override logs root (default: <run-root>/exchange/logs_stageB)")
+    ap.add_argument("--shards-dir", default="", help="Override shards root (default: <run-root>/shards)")
+    ap.add_argument("--preds-dir", default="", help="Override preds root (default: <run-root>/preds)")
+    ap.add_argument("--logs-dir", default="", help="Override logs root (default: <run-root>/logs_stageB)")
     ap.add_argument("--local-base", default="", help="Override local temp base (default: $SLURM_TMPDIR or $TMPDIR or /tmp/<user>)")
 
     args = ap.parse_args()
@@ -763,9 +763,9 @@ def main() -> int:
         print(f"ERROR: model not found: {model_path}", file=sys.stderr)
         return 2
 
-    shards_root = Path(args.shards_dir).resolve() if args.shards_dir else (run_root / "exchange" / "shards")
-    preds_root = Path(args.preds_dir).resolve() if args.preds_dir else (run_root / "exchange" / "preds")
-    logs_root = Path(args.logs_dir).resolve() if args.logs_dir else (run_root / "exchange" / "logs_stageB")
+    shards_root = Path(args.shards_dir).resolve() if args.shards_dir else (run_root / "shards")
+    preds_root = Path(args.preds_dir).resolve() if args.preds_dir else (run_root / "preds")
+    logs_root = Path(args.logs_dir).resolve() if args.logs_dir else (run_root / "logs_stageB")
     safe_mkdir(preds_root)
     safe_mkdir(logs_root)
 

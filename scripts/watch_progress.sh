@@ -9,7 +9,7 @@ Usage:
   $0 --run-root RUN_ROOT [--job JOBID] [--interval SECONDS] --script /path/to/stageX_progress.sh
 
 Options:
-  --run-root     Run root containing exchange/
+  --run-root     Run root directory
   --job          Slurm array master job ID (optional)
   --interval     Refresh interval seconds (default: 5)
   --stage        A or B (default: A). Auto-select stageA_progress.sh or stageB_progress.sh.

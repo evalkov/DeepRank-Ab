@@ -334,7 +334,7 @@ def run_stageA_one_shard(
     do_cluster: bool,
 ) -> StageAResult:
     """
-    Produces exchange/shards/shard_<id>/graphs.h5 + manifest + metadata + STAGEA_DONE
+    Produces shards/shard_<id>/graphs.h5 + manifest + metadata + STAGEA_DONE
     """
     t0 = perf_counter()
     shard_dir = exchange_shards_dir / f"shard_{shard_id}"
@@ -460,7 +460,7 @@ def run_stageA_one_shard(
         "stage": "A",
         "shard_id": shard_id,
         "shard_list": str(shard_list),
-        "exchange_dir": str(shard_dir),
+        "shard_dir": str(shard_dir),
         "chains": {"heavy": heavy, "light": light, "antigen": antigen, "antigen_chainid_for_graph": antigen_chainid_for_graph},
         "num_cores": num_cores,
         "do_cluster": bool(do_cluster),
@@ -499,9 +499,8 @@ def main() -> int:
     args = ap.parse_args()
 
     run_root = Path(args.run_root).resolve()
-    exchange = safe_mkdir(run_root / "exchange")
-    shard_lists_dir = safe_mkdir(exchange / "shard_lists")
-    shards_dir = safe_mkdir(exchange / "shards")
+    shard_lists_dir = safe_mkdir(run_root / "shard_lists")
+    shards_dir = safe_mkdir(run_root / "shards")
 
     if args.make_shards:
         out_lists = build_shard_lists(

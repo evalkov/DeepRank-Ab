@@ -75,7 +75,7 @@ def main():
     args = ap.parse_args()
 
     run_root = Path(args.run_root).resolve()
-    preds_dir = run_root / "exchange" / "preds"
+    preds_dir = run_root / "preds"
     files = sorted(preds_dir.glob("pred_shard_*.hdf5"))
     if not files:
         raise SystemExit(f"No pred_shard_*.hdf5 in {preds_dir}")

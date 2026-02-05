@@ -8,10 +8,10 @@ if [[ -z "${RUN_ROOT}" ]]; then
 fi
 
 shopt -s nullglob
-files=( "${RUN_ROOT}"/exchange/shards/*/meta_stageA.json )
+files=( "${RUN_ROOT}"/shards/*/meta_stageA.json )
 
 if (( ${#files[@]} == 0 )); then
-  echo "ERROR: No meta_stageA.json files found under: ${RUN_ROOT}/exchange/shards/*/" >&2
+  echo "ERROR: No meta_stageA.json files found under: ${RUN_ROOT}/shards/*/" >&2
   exit 1
 fi
 

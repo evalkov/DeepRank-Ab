@@ -32,7 +32,7 @@ Usage:
   $0 RUN_ROOT [--job JOB_ID] [--watch SECONDS] [--top N] [--rate-n N] [--no-slurm]
 
 Options:
-  --run-root   Path to run root containing exchange/
+  --run-root   Path to run root
   --job        Slurm job ID (array master) for compact state summary
   --watch      Refresh every N seconds (runs continuously)
   --top        Show top N most recent DONE shards (default: ${TOP_N})
@@ -87,9 +87,9 @@ PY
   fi
 fi
 
-SHARDS_DIR="${RUN_ROOT}/exchange/shards"
-PREDS_DIR="${RUN_ROOT}/exchange/preds"
-SHARD_LIST_DIR="${RUN_ROOT}/exchange/shard_lists"
+SHARDS_DIR="${RUN_ROOT}/shards"
+PREDS_DIR="${RUN_ROOT}/preds"
+SHARD_LIST_DIR="${RUN_ROOT}/shard_lists"
 
 CACHE_COUNTS="${SHARD_LIST_DIR}/shard_line_counts.tsv"   # sid \t n_lines
 CACHE_META="${SHARD_LIST_DIR}/shard_line_counts.meta"    # tiny stamp file

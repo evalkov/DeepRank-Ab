@@ -1,14 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=drab-A
-#SBATCH --partition=norm
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=64G
-#SBATCH --time=01:00:00
-#SBATCH --array=0-9%10
-#SBATCH --output=%x_%A_%a.log
-#SBATCH --error=%x_%A_%a.err
+# All SBATCH directives are set by run_pipeline.py via CLI args.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -60,8 +51,8 @@ echo "===================="
 
 SCRIPT="${DEEPRANK_ROOT}/scripts/split_stageA_cpu.py"
 
-SHARD_LIST_DIR="${RUN_ROOT}/exchange/shard_lists"
-SHARDS_DIR="${RUN_ROOT}/exchange/shards"
+SHARD_LIST_DIR="${RUN_ROOT}/shard_lists"
+SHARDS_DIR="${RUN_ROOT}/shards"
 mkdir -p "${SHARD_LIST_DIR}" "${SHARDS_DIR}"
 
 READY_FILE="${SHARD_LIST_DIR}/SHARDS_READY"
@@ -74,8 +65,7 @@ LOCK_FILE="${SHARD_LIST_DIR}/.shards.lock"
 COLLECT_COMPUTE_METRICS="${COLLECT_COMPUTE_METRICS:-1}"
 COMPUTE_METRICS_INTERVAL="${COMPUTE_METRICS_INTERVAL:-2}"
 
-# Keep metrics under exchange/ so it's per-run and easy to find
-COMPUTE_METRICS_DIR="${RUN_ROOT}/exchange/compute_metrics"
+COMPUTE_METRICS_DIR="${RUN_ROOT}/compute_metrics"
 mkdir -p "${COMPUTE_METRICS_DIR}"
 
 MONITOR_SCRIPT="${MONITOR_SCRIPT:-${DEEPRANK_ROOT}/scripts/collect_compute_metrics.py}"
