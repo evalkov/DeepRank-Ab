@@ -4,6 +4,12 @@
 #   - "voronota_129" - v1.29, additive tessellation
 #   - "voronota-lt"  - radical tessellation, faster but less accurate
 # Legacy USE_VORONOTA_LT is still supported for backwards compatibility.
+#
+# OpenMP threading for voronota (v1.29+ compiled with -qopenmp):
+#   - VORO_OMP_THREADS: OpenMP threads per voronota subprocess (default: 1)
+#   - This is independent of the global OMP_NUM_THREADS setting
+#   - Use with reduced NUM_CORES to avoid oversubscription:
+#       NUM_CORES=16, VORO_OMP_THREADS=2 -> 32 total threads
 import os
 
 def _get_voronota_binary():
@@ -19,6 +25,20 @@ def _get_voronota_binary():
 
 _VORONOTA_BINARY = _get_voronota_binary()
 _USE_LT = _VORONOTA_BINARY == "voronota-lt"
+
+
+def _get_voro_subprocess_env():
+    """
+    Build environment for voronota subprocesses with controlled OMP_NUM_THREADS.
+
+    Uses VORO_OMP_THREADS env var (default: 1) to set OpenMP threads per voronota call,
+    independent of the global OMP_NUM_THREADS setting.
+    """
+    env = os.environ.copy()
+    voro_threads = os.environ.get("VORO_OMP_THREADS", "1")
+    env["OMP_NUM_THREADS"] = voro_threads
+    return env
+
 
 import subprocess
 from pathlib import Path
@@ -113,15 +133,21 @@ class VoronotaAreasLegacy:
 
     @staticmethod
     def run_voro_contacts(pdb_fpath, voronota_exec) -> tuple[bytes, bytes]:
-        """Run two-step voronota pipeline."""
+        """Run two-step voronota pipeline.
+
+        OpenMP threads controlled by VORO_OMP_THREADS env var (default: 1).
+        """
         with open(pdb_fpath, "rb") as fin:
             pdb_lines = fin.read()
+
+        env = _get_voro_subprocess_env()
 
         balls = subprocess.Popen(
             [voronota_exec, "get-balls-from-atoms-file"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
         )
         balls_outputs, _ = balls.communicate(input=pdb_lines)
 
@@ -130,6 +156,7 @@ class VoronotaAreasLegacy:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
         )
         contacts_outputs, _ = contacts.communicate(input=balls_outputs)
 

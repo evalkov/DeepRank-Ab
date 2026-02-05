@@ -36,6 +36,14 @@ MIN_PER_SHARD="${MIN_PER_SHARD:-10}"
 MAX_PER_SHARD="${MAX_PER_SHARD:-100}"
 GLOB_PAT="${GLOB_PAT:-**/*.pdb}"
 
+# Voronota parallelization settings:
+# - VORO_OMP_THREADS: OpenMP threads per voronota subprocess (default: 1)
+#   For voronota 1.29 compiled with -qopenmp, increase for intra-voronota parallelism.
+#   Trade-off: NUM_CORES × VORO_OMP_THREADS should not exceed total cores.
+#   Examples: NUM_CORES=32, VORO_OMP_THREADS=1 -> 32 threads (default)
+#             NUM_CORES=16, VORO_OMP_THREADS=2 -> 32 threads
+#             NUM_CORES=8,  VORO_OMP_THREADS=4 -> 32 threads
+export VORO_OMP_THREADS="${VORO_OMP_THREADS:-1}"
 export VORO_PROCESSORS=1
 export VORO_CHAIN_PARALLEL=0
 export OMP_NUM_THREADS=1

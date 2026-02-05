@@ -94,6 +94,28 @@ export PREFETCH_FACTOR=4
 
 ---
 
+### 5. Per-subprocess OpenMP Control for Voronota
+
+**File**: `src/tools/VoroArea.py`
+
+**Change**: Added `VORO_OMP_THREADS` environment variable to control OpenMP threads per voronota subprocess, independent of Python workers and global `OMP_NUM_THREADS`.
+
+```python
+def _get_voro_subprocess_env():
+    env = os.environ.copy()
+    voro_threads = os.environ.get("VORO_OMP_THREADS", "1")
+    env["OMP_NUM_THREADS"] = voro_threads
+    return env
+```
+
+This allows tuning two levels of parallelism independently:
+- `NUM_CORES`: Python workers (GraphGenMP parallelism)
+- `VORO_OMP_THREADS`: OpenMP threads within each voronota call
+
+**Impact**: Enables exploitation of voronota 1.29's OpenMP support without oversubscription
+
+---
+
 ## Configuration Recommendations
 
 ### Voronota Tuning
@@ -102,19 +124,35 @@ The pipeline supports these environment variables for Voronota optimization:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `VORO_OMP_THREADS` | 1 | OpenMP threads per voronota (v1.29) subprocess |
 | `VORO_PROCESSORS` | 1 | OpenMP threads per voronota-lt subprocess |
 | `VORO_CHAIN_PARALLEL` | 1 | Run chain A/B SAS in parallel |
 
-**For HPC (many workers)**:
+**For voronota 1.29 (compiled with -qopenmp)**:
+
+The `VORO_OMP_THREADS` variable controls OpenMP parallelism independently of Python workers:
+
 ```bash
-export VORO_PROCESSORS=1
-export VORO_CHAIN_PARALLEL=0  # Avoid 2x oversubscription
+# Conservative (default) - 32 workers, single-threaded voronota
+export NUM_CORES=32
+export VORO_OMP_THREADS=1
+# Total: 32 × 1 = 32 threads
+
+# Balanced - fewer workers, multi-threaded voronota
+export NUM_CORES=16
+export VORO_OMP_THREADS=2
+# Total: 16 × 2 = 32 threads
+
+# Fewer large jobs - better for large PDBs
+export NUM_CORES=8
+export VORO_OMP_THREADS=4
+# Total: 8 × 4 = 32 threads
 ```
 
-**For workstation (few workers)**:
+**For voronota-lt**:
 ```bash
-export VORO_PROCESSORS=2  # or 4
-export VORO_CHAIN_PARALLEL=1
+export VORO_PROCESSORS=1
+export VORO_CHAIN_PARALLEL=0  # Avoid 2x oversubscription on HPC
 ```
 
 ---
