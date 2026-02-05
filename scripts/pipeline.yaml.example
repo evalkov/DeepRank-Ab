@@ -13,31 +13,35 @@ chains:
   light: "-"      # Use "-" for VHH (no light chain)
   antigen: T
 
+# Dynamic resource allocation
+# Array sizes are computed automatically based on input data
+# These control max concurrent jobs to avoid overwhelming the cluster
+max_concurrent_a: 20    # Max concurrent Stage A array jobs
+max_concurrent_b: 10    # Max concurrent Stage B array jobs
+
 # Stage A (CPU): Graph generation
 stage_a:
   partition: norm
-  cores: 32
+  cores: 32             # CPUs per task (auto-recommended based on input)
   mem_gb: 64
   time: "01:00:00"
-  array: "0-9%10"           # SLURM array spec (adjust based on shard count)
-  # Sharding parameters
-  target_shard_gb: 0.1
-  min_per_shard: 10
-  max_per_shard: 100
-  glob: "**/*.pdb"
+  # Sharding parameters (controls how PDBs are grouped)
+  target_shard_gb: 0.1  # Target shard size - smaller = more shards = more parallelism
+  min_per_shard: 10     # Minimum PDBs per shard
+  max_per_shard: 100    # Maximum PDBs per shard
+  glob: "**/*.pdb"      # Glob pattern to find PDBs
   # Voronota settings
   voronota_binary: voronota_129   # voronota | voronota_129 | voronota-lt
-  use_freesasa: 1                  # 1 = freesasa, 0 = voronota-lt for BSA
-  voro_omp_threads: 1              # OpenMP threads per voronota call
+  use_freesasa: 1                 # 1 = freesasa, 0 = voronota-lt for BSA
+  voro_omp_threads: 1             # OpenMP threads per voronota call
 
 # Stage B (GPU): ESM embeddings + inference
 stage_b:
   partition: gpu
-  gpus: 4
-  cores: 32
+  gpus: 4               # GPUs per task
+  cores: 32             # CPUs per task
   mem_gb: 128
   time: "04:00:00"
-  array: "0-9%5"            # SLURM array spec
   # ESM settings
   esm_model: esm2_t33_650M_UR50D
   esm_toks_per_batch: 12288

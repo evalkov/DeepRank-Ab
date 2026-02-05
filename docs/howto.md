@@ -9,11 +9,35 @@ cp scripts/pipeline.yaml.example my_run.yaml
 # 2. Edit the config with your paths
 vim my_run.yaml
 
-# 3. Validate your config
-python scripts/run_pipeline.py my_run.yaml --validate-only
+# 3. Analyze input and see resource estimates
+python scripts/run_pipeline.py my_run.yaml --analyze
 
-# 4. Run the full pipeline
+# 4. Dry run to preview job submissions
+python scripts/run_pipeline.py my_run.yaml --dry-run
+
+# 5. Run the full pipeline
 python scripts/run_pipeline.py my_run.yaml
+```
+
+## Dynamic Resource Allocation
+
+The pipeline **automatically sizes job arrays** based on your input data:
+
+1. **Analyzes input PDBs** - counts files, calculates sizes
+2. **Estimates optimal shards** - based on `target_shard_gb` setting
+3. **Sizes arrays dynamically** - no manual `--array` specification needed
+4. **Respects concurrency limits** - `max_concurrent_a` and `max_concurrent_b`
+
+```bash
+# See what the pipeline will do before running
+python scripts/run_pipeline.py my_run.yaml --analyze
+
+# Output:
+# PDBs: 5,000 files (2.50 GB)
+# Estimated shards: 25
+# Recommended cores: 32
+# Stage A array: 0-24%20
+# Stage B array: 0-24%10
 ```
 
 ---
