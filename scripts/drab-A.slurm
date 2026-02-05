@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+#SBATCH --time=01:00:00
 #SBATCH --array=0-9%10
 #SBATCH --output=%x_%A_%a.log
 #SBATCH --error=%x_%A_%a.err
@@ -40,7 +40,7 @@ export VORO_PROCESSORS=1
 export VORO_CHAIN_PARALLEL=0
 export OMP_NUM_THREADS=1
 export OMP_PROC_BIND=close
-export OMP_PLACES=core
+export OMP_PLACES=cores
 
 export TMPDIR="${SLURM_TMPDIR:-/tmp}"
 echo "=== Storage check ==="
@@ -97,7 +97,10 @@ PY
 
   # If nvidia-smi exists, count GPUs; otherwise: CPU node, return empty.
   if command -v nvidia-smi >/dev/null 2>&1; then
-    n="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+    n="$(nvidia-smi -L 2>/dev/null | wc -l | xargs || echo 0)"
+    # Ensure n is a single integer
+    n="${n%%[!0-9]*}"
+    [[ -z "${n}" ]] && n=0
     if [[ "${n}" -ge 1 ]]; then
       python3 - <<PY
 n=int("${n}")
@@ -162,6 +165,69 @@ trap cleanup_monitor EXIT
 start_monitor
 
 # ============================================================
+# VORONOTA / BSA BACKEND CONFIGURATION
+# ============================================================
+# VORONOTA_BINARY: which voronota binary to use for contact area computation
+#   - voronota     (default) - legacy v1.28, additive tessellation, validated
+#   - voronota_129           - v1.29, additive tessellation
+#   - voronota-lt            - radical tessellation, faster but less accurate
+# USE_FREESASA: 1 = freesasa (default, validated), 0 = voronota-lt (fast)
+export VORONOTA_BINARY="${VORONOTA_BINARY:-voronota}"
+export USE_FREESASA="${USE_FREESASA:-1}"
+
+# Locate voronota binary and determine tessellation type
+VORONOTA_DIR="${DEEPRANK_ROOT}/src/tools/voronota"
+case "${VORONOTA_BINARY}" in
+  voronota)
+    VORONOTA_BIN="${VORONOTA_DIR}/voronota"
+    VORONOTA_TYPE="additive tessellation"
+    export USE_VORONOTA_LT=0
+    ;;
+  voronota_129)
+    VORONOTA_BIN="${VORONOTA_DIR}/voronota_129"
+    VORONOTA_TYPE="additive tessellation"
+    export USE_VORONOTA_LT=0
+    ;;
+  voronota-lt)
+    VORONOTA_BIN="${VORONOTA_DIR}/voronota-lt"
+    VORONOTA_TYPE="radical tessellation"
+    export USE_VORONOTA_LT=1
+    ;;
+  *)
+    echo "[StageA] ERROR: Unknown VORONOTA_BINARY=${VORONOTA_BINARY}"
+    echo "[StageA]   Valid options: voronota (default), voronota_129, voronota-lt"
+    exit 1
+    ;;
+esac
+
+# Verify binary exists
+if [[ ! -x "${VORONOTA_BIN}" ]]; then
+  echo "[StageA] ERROR: voronota binary not found or not executable: ${VORONOTA_BIN}"
+  exit 1
+fi
+
+# Extract version number (e.g., "Voronota version 1.28.4054" -> "1.28.4054")
+# Note: voronota exits non-zero when run without args, so use || true
+echo "[DEBUG] VORONOTA_BIN=${VORONOTA_BIN}"
+echo "[DEBUG] Binary exists: $(test -f "${VORONOTA_BIN}" && echo yes || echo no)"
+echo "[DEBUG] Binary executable: $(test -x "${VORONOTA_BIN}" && echo yes || echo no)"
+echo "[DEBUG] ldd check:"
+ldd "${VORONOTA_BIN}" 2>&1 | head -5 || true
+echo "[DEBUG] Running voronota..."
+VORONOTA_RAW=$("${VORONOTA_BIN}" 2>&1 | head -1 || true)
+echo "[DEBUG] VORONOTA_RAW='${VORONOTA_RAW}'"
+VORONOTA_VERSION=$(echo "${VORONOTA_RAW}" | awk '{print $3}')
+echo "[DEBUG] VORONOTA_VERSION='${VORONOTA_VERSION}'"
+[[ -z "${VORONOTA_VERSION}" ]] && VORONOTA_VERSION="unknown"
+VORONOTA_BACKEND="$(basename "${VORONOTA_BIN}") v${VORONOTA_VERSION} (${VORONOTA_TYPE})"
+
+if [[ "${USE_FREESASA}" == "1" ]]; then
+  BSA_BACKEND="freesasa"
+else
+  BSA_BACKEND="voronota-lt"
+fi
+
+# ============================================================
 # SHARD PARAMETER STAMP (uniquely defines sharding scheme)
 # ============================================================
 PARAM_STAMP=$(
@@ -174,6 +240,8 @@ MAX_PER_SHARD=${MAX_PER_SHARD}
 HEAVY=${HEAVY}
 LIGHT=${LIGHT}
 ANTIGEN=${ANTIGEN}
+VORONOTA=${VORONOTA_BACKEND}
+BSA=${BSA_BACKEND}
 EOF
 )
 
