@@ -11,6 +11,14 @@ See `docs/improvements.md` for details.
 ### 5. Per-subprocess OpenMP Control (VORO_OMP_THREADS) - DONE
 See `docs/improvements.md` for details.
 
+### 6. Dynamic Resource Allocation - DONE
+Pipeline launcher now analyzes input PDBs and automatically sizes SLURM arrays:
+- `--analyze` flag to preview resource estimates
+- Two-phase Stage A (sharding then processing)
+- Dynamic array sizing based on estimated/actual shard count
+- Configurable concurrency limits (`max_concurrent_a`, `max_concurrent_b`)
+See `docs/howto.md` for usage.
+
 ---
 
 ## Medium Priority
@@ -77,6 +85,7 @@ See `docs/improvements.md` for details.
 | Medium | Batch annotation by model | Low | 5% | Pending |
 | ~~Medium~~ | ~~DataLoader tuning~~ | ~~Low~~ | ~~5-15%~~ | **DONE** |
 | ~~Medium~~ | ~~VORO_OMP_THREADS~~ | ~~Low~~ | ~~Variable~~ | **DONE** |
+| ~~High~~ | ~~Dynamic resource allocation~~ | ~~Medium~~ | ~~Usability~~ | **DONE** |
 | Low | Async I/O | Medium | 20-50% | Pending |
 | Low | Caching layer | High | 50-80% | Pending |
 | Low | Distributed inference | High | 2-8x | Pending |
