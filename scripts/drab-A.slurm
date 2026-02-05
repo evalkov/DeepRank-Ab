@@ -208,8 +208,13 @@ fi
 
 # Extract version number (e.g., "Voronota version 1.28.4054" -> "1.28.4054")
 # Note: voronota exits non-zero when run without args, so use || true
-VORONOTA_RAW=$("${VORONOTA_BIN}" 2>&1 | head -1 || true)
 echo "[DEBUG] VORONOTA_BIN=${VORONOTA_BIN}"
+echo "[DEBUG] Binary exists: $(test -f "${VORONOTA_BIN}" && echo yes || echo no)"
+echo "[DEBUG] Binary executable: $(test -x "${VORONOTA_BIN}" && echo yes || echo no)"
+echo "[DEBUG] ldd check:"
+ldd "${VORONOTA_BIN}" 2>&1 | head -5 || true
+echo "[DEBUG] Running voronota..."
+VORONOTA_RAW=$("${VORONOTA_BIN}" 2>&1 | head -1 || true)
 echo "[DEBUG] VORONOTA_RAW='${VORONOTA_RAW}'"
 VORONOTA_VERSION=$(echo "${VORONOTA_RAW}" | awk '{print $3}')
 echo "[DEBUG] VORONOTA_VERSION='${VORONOTA_VERSION}'"
