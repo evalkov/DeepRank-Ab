@@ -2,31 +2,83 @@
 
 Three-stage pipeline for large-scale antibody-antigen binding affinity prediction.
 
+## Script Map
+
+```
+                              config.yaml
+                                  |
+                          run_pipeline.py
+                         /       |       \
+                   sbatch      sbatch     sbatch
+                  (array)     (array)    (single)
+                   /             |            \
+  .-----------.  .-----------.  .-----------.  .-----------.
+  | STAGE A   |  | STAGE A   |  | STAGE B   |  | STAGE C   |
+  | drab-A    |  | drab-A    |  | drab-B    |  | drab-C    |
+  | (shard)   |  | (process) |  |           |  |           |
+  '-----------'  '-----------'  '-----------'  '-----------'
+       |              |              |              |
+       v              v              v              |
+ split_stageA   split_stageA   split_stageB        |
+  _cpu.py        _cpu.py        _gpu.py            |
+  --make-        --shard-id     (ESM2 +            |
+    shards                       inference)        |
+       |              |              |              v
+       |         collect_       collect_       merge_pred
+       |         compute_       compute_        _hdf5.py
+       |         metrics.py     metrics.py         |
+       |         (background)   (background)       v
+       |              |              |         inline Python
+       |              v              v         (TSV + stats)
+       |         compute_       compute_           |
+       |         metrics/       metrics/           v
+       |              \             /       summarize_compute
+       |               \           /          _metrics.py
+       |                \         /                |
+       |                 v       v           .-----+------.
+       |                 RUN_ROOT/           |            |
+       v                compute_metrics/     v            v
+  shard_lists/               |          plot_compute  plot_compute
+  shards/                    |          _metrics_     _metrics_
+  preds/                     |          summary.py    timeseries.py
+                             |               |            |
+                             v               v            v
+                      summary_*_ALL     *_summary    *_timeseries
+                       .tsv / .json       .pdf          .pdf
+
+  MONITORING (user-facing, run in parallel)
+  ------------------------------------------
+  watch_progress.sh --stage A --> stageA_progress.sh
+  watch_progress.sh --stage B --> stageB_progress.sh
+  stageA_timing_breakdown.sh
+```
+
 ## Overview
 
-| Stage | Script | Resources | Purpose |
-|-------|--------|-----------|---------|
-| A | `drab-A.slurm` | CPU (32 cores, 64G) | Feature extraction, graph generation |
-| B | `drab-B.slurm` | GPU (4×L40s, 128G) | ESM embeddings + model inference |
-| C | `drab-C.slurm` | CPU (4 cores, 16G) | Merge predictions, export results |
+| Stage | SLURM script | Resources | Python workhorse | Purpose |
+|-------|--------------|-----------|------------------|---------|
+| A (shard) | `drab-A.slurm` | CPU | `split_stageA_cpu.py --make-shards` | Partition PDBs into shards |
+| A (process) | `drab-A.slurm` | CPU (32 cores, 64G) | `split_stageA_cpu.py --shard-id` | Voronota contacts, graph construction, clustering |
+| B | `drab-B.slurm` | GPU (4x, 128G) | `split_stageB_gpu.py` | ESM2 embeddings + model inference |
+| C | `drab-C.slurm` | CPU (4 cores, 16G) | `merge_pred_hdf5.py` + inline | Merge predictions, export TSV/stats, metrics analysis |
+
+All SBATCH directives are set by `run_pipeline.py` via CLI args. The `.slurm` scripts
+contain no `#SBATCH` headers.
 
 ## Quick Start
 
 ```bash
-# Set required environment variables
-export RUN_ROOT=/path/to/run_dir          # Output directory
-export PDB_ROOT=/path/to/pdbs             # Input PDB directory
-export DEEPRANK_ROOT=/path/to/DeepRank-Ab # Repository root
-export MODEL_PATH=/path/to/model.pt       # Trained model (for StageB)
+# Recommended: use the pipeline launcher with a YAML config
+python scripts/run_pipeline.py pipeline.yaml
 
-# Submit StageA
-sbatch scripts/drab-A.slurm
+# Dry run (shows sbatch commands without submitting)
+python scripts/run_pipeline.py pipeline.yaml --dry-run
 
-# When StageA completes, submit StageB
-scripts/submit_stageB.sh scripts/drab-B.slurm
+# Run a single stage
+python scripts/run_pipeline.py pipeline.yaml --stage a
 
-# When StageB completes, submit StageC
-sbatch scripts/drab-C.slurm
+# Analyze input data and show resource estimates
+python scripts/run_pipeline.py pipeline.yaml --analyze
 ```
 
 ## Directory Structure
@@ -35,30 +87,30 @@ After running, `RUN_ROOT` contains:
 
 ```
 RUN_ROOT/
-├── shard_lists/              # StageA: PDB lists per shard
+├── shard_lists/              # Stage A: PDB file lists per shard
 │   ├── shard_000000.lst
-│   ├── shard_000001.lst
 │   └── ...
-├── shards/                   # StageA: processed shards
+├── shards/                   # Stage A: processed graph data
 │   ├── shard_000000/
 │   │   ├── graphs.h5
 │   │   ├── meta_stageA.json
 │   │   └── STAGEA_DONE
 │   └── ...
-├── preds/                    # StageB: predictions
+├── preds/                    # Stage B: per-shard predictions
 │   ├── pred_shard_000000.h5
 │   ├── DONE_shard_000000.ok
 │   └── ...
-├── summary/                  # StageC: final outputs
+├── summary/                  # Stage C: final merged outputs
 │   ├── predictions_merged.h5
 │   ├── all_predictions.tsv.gz
 │   └── stats.json
-├── compute_metrics/          # Optional performance metrics
-├── logs/                     # SLURM job logs
+├── compute_metrics/          # Raw performance metrics (CSV)
+├── logs/                     # SLURM job logs (.log / .err)
 ├── compute_metrics_summary.pdf
 ├── compute_metrics_timeseries.pdf
 ├── summary_*_ALL.tsv
-└── summary_*_ALL.json
+├── summary_*_ALL.json
+└── pipeline_jobs.json        # Job IDs from run_pipeline.py
 ```
 
 ## Stage A: Feature Extraction
@@ -81,9 +133,9 @@ CPU-bound stage that processes PDBs into graph representations.
 
 ### Array Sizing
 
-Adjust `--array=0-N%M` in the SLURM header:
-- `N`: Number of shards minus 1 (or use a large number; excess tasks exit cleanly)
-- `M`: Maximum concurrent tasks
+`run_pipeline.py` sets `--array=0-N%M` automatically:
+- `N`: Number of shards minus 1 (excess tasks exit cleanly)
+- `M`: `max_concurrent_a` from YAML config (default: 20)
 
 Task 0 builds the shard lists; other tasks wait for completion before processing.
 
@@ -102,31 +154,21 @@ GPU-bound stage that computes ESM embeddings and runs model inference.
 | `BATCH_SIZE` | `64` | Inference batch size |
 | `DL_WORKERS` | `8` | DataLoader workers |
 
-### Submitting
-
-Use `submit_stageB.sh` to auto-calculate array size:
-
-```bash
-export RUN_ROOT=/path/to/run
-export DEEPRANK_ROOT=/path/to/DeepRank-Ab
-export MODEL_PATH=/path/to/model.pt
-
-# Optional: tune shards per task
-export SHARDS_PER_TASK=20
-export MAX_CONCURRENT=8
-
-scripts/submit_stageB.sh scripts/drab-B.slurm
-```
-
 ## Stage C: Consolidation
 
-Merges per-shard predictions into final outputs.
+Merges per-shard predictions and runs metrics analysis.
 
 ### Outputs
 
-- `predictions_merged.h5`: Combined HDF5 with all predictions
-- `all_predictions.tsv.gz`: Tab-separated export (pdb_id, dockq)
-- `stats.json`: Summary statistics (count, mean, median, percentiles, quality bins)
+| File | Description |
+|------|-------------|
+| `summary/predictions_merged.h5` | Combined HDF5 with all predictions |
+| `summary/all_predictions.tsv.gz` | Tab-separated export (pdb_id, dockq) |
+| `summary/stats.json` | Summary statistics (count, mean, median, percentiles, quality bins) |
+| `compute_metrics_summary.pdf` | Single-page bar-chart of resource usage across tasks |
+| `compute_metrics_timeseries.pdf` | Multi-page time-series of CPU/GPU/memory/IO |
+| `summary_*_ALL.tsv` | Aggregate metrics table |
+| `summary_*_ALL.json` | Aggregate metrics (JSON) |
 
 ### Quality Bins
 
@@ -142,7 +184,7 @@ Merges per-shard predictions into final outputs.
 
 ## stageA_progress.sh
 
-Monitor StageA shard processing.
+Monitor Stage A shard processing.
 
 ```bash
 # One-shot status
@@ -166,50 +208,21 @@ scripts/stageA_progress.sh --run-root /path/to/run --job 12345678 --watch 5
 | `--rate-n N` | `20` | Use last N completions for ETA |
 | `--no-slurm` | | Disable Slurm queries |
 
-### Output
-
-- Shard completion count and percentage
-- ETA based on recent completion rate
-- PDB processed/remaining counts
-- Prep ok/fail statistics
-- Recent STAGEA_DONE timestamps
-- Incomplete shard IDs
-- Slurm job state summary (if `--job` provided)
-
 ## stageB_progress.sh
 
-Monitor StageB GPU inference.
+Monitor Stage B GPU inference. Same options as `stageA_progress.sh`.
 
 ```bash
-# One-shot status
-scripts/stageB_progress.sh --run-root /path/to/run
-
-# Live watch mode
 scripts/stageB_progress.sh --run-root /path/to/run --job 12345678 --watch 5
 ```
-
-Same options as `stageA_progress.sh`.
-
-### Features
-
-- No HDF5 reads (pure filesystem, no h5py dependency)
-- Cached shard line counts for fast refresh
-- Nanosecond mtime precision for accurate ETA
-- Shows StageA-ready vs StageB-done counts
 
 ## watch_progress.sh
 
 Generic wrapper for live monitoring.
 
 ```bash
-# Watch StageA
 scripts/watch_progress.sh --run-root /path/to/run --stage A --job 12345678
-
-# Watch StageB
 scripts/watch_progress.sh --run-root /path/to/run --stage B --job 12345678
-
-# Custom interval
-scripts/watch_progress.sh --run-root /path/to/run --stage A --interval 10
 ```
 
 ## stageA_timing_breakdown.sh
@@ -220,21 +233,12 @@ Aggregate timing statistics from completed shards.
 scripts/stageA_timing_breakdown.sh /path/to/run
 ```
 
-Output:
-```
-shards:      150
-total_s:     12345.6
-prep_s:       1234.5 ( 10.0%)
-annotate_s:   4567.8 ( 37.0%)
-graphs_s:     5432.1 ( 44.0%)
-cluster_s:    1111.2 (  9.0%)
-```
-
 ---
 
 # Compute Metrics
 
-Both StageA and StageB collect optional performance metrics.
+Both Stage A and Stage B collect optional performance metrics via
+`collect_compute_metrics.py` running as a background daemon.
 
 ### Configuration
 
@@ -245,17 +249,18 @@ Both StageA and StageB collect optional performance metrics.
 
 Metrics are saved to `RUN_ROOT/compute_metrics/`.
 
-Stage C automatically runs the analysis scripts and places output PDFs and tables in `RUN_ROOT/`.
+Stage C automatically runs the analysis scripts and places output PDFs and
+tables in `RUN_ROOT/`.
 
 ### Manual Analysis
 
 ```bash
-# Summarize metrics
+# Summarize raw CSVs into aggregate tables
 python scripts/summarize_compute_metrics.py /path/to/run/compute_metrics
 
-# Plot time series
+# Plot time-series (multi-page PDF, one page per task)
 python scripts/plot_compute_metrics_timeseries.py /path/to/run/compute_metrics
 
-# Plot summary (uses the ALL.tsv produced by summarize)
+# Plot summary bar-charts (single-page PDF)
 python scripts/plot_compute_metrics_summary.py /path/to/run/compute_metrics/summary_*_ALL.tsv
 ```
