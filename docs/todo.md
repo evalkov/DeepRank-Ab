@@ -8,6 +8,9 @@ See `docs/improvements.md` for details.
 ### 4. DataLoader Tuning - DONE
 See `docs/improvements.md` for details.
 
+### 5. Per-subprocess OpenMP Control (VORO_OMP_THREADS) - DONE
+See `docs/improvements.md` for details.
+
 ---
 
 ## Medium Priority
@@ -73,6 +76,7 @@ See `docs/improvements.md` for details.
 | Medium | Dynamic ESM load balancing | Medium | 5-20% | Pending |
 | Medium | Batch annotation by model | Low | 5% | Pending |
 | ~~Medium~~ | ~~DataLoader tuning~~ | ~~Low~~ | ~~5-15%~~ | **DONE** |
+| ~~Medium~~ | ~~VORO_OMP_THREADS~~ | ~~Low~~ | ~~Variable~~ | **DONE** |
 | Low | Async I/O | Medium | 20-50% | Pending |
 | Low | Caching layer | High | 50-80% | Pending |
 | Low | Distributed inference | High | 2-8x | Pending |
