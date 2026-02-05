@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from time import perf_counter
@@ -165,6 +165,29 @@ def build_merged_structure(
     io.save(str(out_pdb))
 
     return seqH, seqL, seqAg
+
+
+def _prep_one_pdb(args: Tuple) -> Tuple[str, Optional[str], Optional[str], Optional[str], bool]:
+    """
+    Worker function for parallel PDB prep.
+    Returns (stem, seqH, seqL, seqAg, success).
+    """
+    pdb_path, heavy, light, antigen, merged_dir, fasta_dir = args
+    stem = pdb_path.stem
+    out_pdb = merged_dir / f"{stem}.pdb"
+    try:
+        seqH, seqL, seqAg = build_merged_structure(pdb_path, heavy, light, antigen, out_pdb)
+        # Write HL fasta for annotate
+        fasta = fasta_dir / f"{stem}_HL.fasta"
+        with open(fasta, "w") as f:
+            if seqH:
+                f.write(f">{stem}.H\n{seqH}\n")
+            if seqL:
+                f.write(f">{stem}.L\n{seqL}\n")
+        return (stem, seqH, seqL, seqAg, True)
+    except Exception:
+        return (stem, None, None, None, False)
+
 
 def correct_region_json(region_json: Path) -> None:
     # DeepRank-Ab annotate sometimes uses keys like "foo.pdb" – normalize to "foo"
@@ -352,35 +375,30 @@ def run_stageA_one_shard(
         expanded.extend(split_models_if_ensemble(p, local_root / "models" / p.stem))
 
     # PREP: build merged 2-chain PDBs + HL fasta (for annotate), and manifest for ESM later
-    prep_s = 0.0
+    # Parallelized across cores for better throughput
+    t1 = perf_counter()
+    prep_args = [(p, heavy, light, antigen, merged_dir, fasta_dir) for p in expanded]
+    max_prep_workers = min(num_cores, len(expanded)) if expanded else 1
+
     ok = 0
     fail = 0
     manifest_rows: List[str] = []
-    for p in expanded:
-        stem = p.stem
-        out_pdb = merged_dir / f"{stem}.pdb"
-        t1 = perf_counter()
-        try:
-            seqH, seqL, seqAg = build_merged_structure(p, heavy, light, antigen, out_pdb)
-            # Write HL fasta for annotate
-            fasta = fasta_dir / f"{stem}_HL.fasta"
-            with open(fasta, "w") as f:
-                if seqH:
-                    f.write(f">{stem}.H\n{seqH}\n")
-                if seqL:
-                    f.write(f">{stem}.L\n{seqL}\n")
-            # Manifest for ESM:
-            seqA = (seqH or "") + (seqL or "")
-            seqB = (seqAg or "")
-            if seqA:
-                manifest_rows.append(f"{stem}.A\t{stem}\tA\t{len(seqA)}\t{seqA}\n")
-            if seqB:
-                manifest_rows.append(f"{stem}.B\t{stem}\tB\t{len(seqB)}\t{seqB}\n")
-            ok += 1
-        except Exception:
-            fail += 1
-        finally:
-            prep_s += (perf_counter() - t1)
+
+    with ProcessPoolExecutor(max_workers=max_prep_workers) as ex:
+        for stem, seqH, seqL, seqAg, success in ex.map(_prep_one_pdb, prep_args):
+            if success:
+                # Manifest for ESM:
+                seqA = (seqH or "") + (seqL or "")
+                seqB = (seqAg or "")
+                if seqA:
+                    manifest_rows.append(f"{stem}.A\t{stem}\tA\t{len(seqA)}\t{seqA}\n")
+                if seqB:
+                    manifest_rows.append(f"{stem}.B\t{stem}\tB\t{len(seqB)}\t{seqB}\n")
+                ok += 1
+            else:
+                fail += 1
+
+    prep_s = perf_counter() - t1
 
     # Annotate (CPU)
     t2 = perf_counter()

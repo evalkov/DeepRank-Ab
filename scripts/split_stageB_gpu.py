@@ -547,7 +547,7 @@ def inject_embeddings_from_parts(graph_h5: Path, part_h5s: List[Path], label_to_
 # ----------------------------
 # DeepRank-Ab inference
 # ----------------------------
-def predict(graph_h5: Path, model_path: Path, out_pred_h5: Path, device: str, dl_workers: int, batch_size: int, num_cores: int) -> None:
+def predict(graph_h5: Path, model_path: Path, out_pred_h5: Path, device: str, dl_workers: int, batch_size: int, num_cores: int, prefetch_factor: int = 4) -> None:
     if dl_workers < 0:
         dl_workers = 0
     if dl_workers > num_cores:
@@ -562,6 +562,7 @@ def predict(graph_h5: Path, model_path: Path, out_pred_h5: Path, device: str, dl
         task="reg",
         batch_size=batch_size,
         num_workers=dl_workers,
+        prefetch_factor=prefetch_factor,
         device_name=device,
         shuffle=False,
         pretrained_model=str(model_path),
@@ -585,6 +586,7 @@ def process_one_shard(
     num_cores: int,
     dl_workers: int,
     batch_size: int,
+    prefetch_factor: int,
     esm_gpus: int,
     esm_toks_per_batch: int,
     esm_scalar_dtype: str,
@@ -666,6 +668,7 @@ def process_one_shard(
         dl_workers=dl_workers,
         batch_size=batch_size,
         num_cores=num_cores,
+        prefetch_factor=prefetch_factor,
     )
     timings["infer_s"] = perf_counter() - t_inf0
 
@@ -723,6 +726,7 @@ def main() -> int:
     ap.add_argument("--num-cores", type=int, default=getenv_int("NUM_CORES", 32))
     ap.add_argument("--dl-workers", type=int, default=getenv_int("DL_WORKERS", 8))
     ap.add_argument("--batch-size", type=int, default=getenv_int("BATCH_SIZE", 64))
+    ap.add_argument("--prefetch-factor", type=int, default=getenv_int("PREFETCH_FACTOR", 4))
 
     ap.add_argument("--shard-id", default="", help="Process a single shard id (e.g. 000000)")
     ap.add_argument("--start-index", type=int, default=-1, help="Start shard index (0-based)")
@@ -833,6 +837,7 @@ def main() -> int:
                 num_cores=int(args.num_cores),
                 dl_workers=int(args.dl_workers),
                 batch_size=int(args.batch_size),
+                prefetch_factor=int(args.prefetch_factor),
                 esm_gpus=esm_gpus,
                 esm_toks_per_batch=esm_toks,
                 esm_scalar_dtype=esm_dtype,

@@ -133,6 +133,7 @@ class NeuralNet(object):
         threshold=None,
         device_name=None,
         num_workers=1,
+        prefetch_factor=2,
         pretrained_model=None,
         shuffle=True,
         outdir="./",
@@ -156,6 +157,7 @@ class NeuralNet(object):
 
         # args to attributes
         self.num_workers = num_workers
+        self.prefetch_factor = prefetch_factor if num_workers > 0 else None
         self.device_name = device_name
 
         # EMA
@@ -251,7 +253,11 @@ class NeuralNet(object):
             clustering_method=self.cluster_nodes,
         )
         #PreCluster(test_dataset, method=self.cluster_nodes)
-        self.test_loader = DataLoader(test_dataset, num_workers=self.num_workers)
+        self.test_loader = DataLoader(
+            test_dataset,
+            num_workers=self.num_workers,
+            prefetch_factor=self.prefetch_factor,
+        )
         print("test set loaded")
 
         self.put_model_to_device(test_dataset, Net)
@@ -317,6 +323,7 @@ class NeuralNet(object):
             batch_size=self.batch_size,
             shuffle=self.shuffle,
             num_workers=self.num_workers,
+            prefetch_factor=self.prefetch_factor,
         )
         print("training set loaded")
 
@@ -326,6 +333,7 @@ class NeuralNet(object):
                 batch_size=self.batch_size,
                 shuffle=False,
                 num_workers=self.num_workers,
+                prefetch_factor=self.prefetch_factor,
             )
             print("validation set loaded")
 
@@ -348,6 +356,7 @@ class NeuralNet(object):
             self.valid_loader = DataLoader(
                 valid_dataset,
                 num_workers=self.num_workers,
+                prefetch_factor=self.prefetch_factor,
                 batch_size=self.batch_size,
                 shuffle=False,
             )
@@ -728,7 +737,12 @@ class NeuralNet(object):
                 )
                 print("test set loaded")
                 #PreCluster(test_dataset, method=self.cluster_nodes)
-                self.test_loader = DataLoader(test_dataset, num_workers=self.num_workers, batch_size=self.batch_size)
+                self.test_loader = DataLoader(
+                    test_dataset,
+                    num_workers=self.num_workers,
+                    prefetch_factor=self.prefetch_factor,
+                    batch_size=self.batch_size,
+                )
 
             net = self._net_for_eval()
             net.eval()
@@ -817,8 +831,9 @@ class NeuralNet(object):
                 self.pred_loader = DataLoader(
                     pred_dataset,
                     num_workers=self.num_workers,
+                    prefetch_factor=self.prefetch_factor,
                     batch_size=self.batch_size,
-                    shuffle=False
+                    shuffle=False,
                 )
 
             net = self._net_for_eval()

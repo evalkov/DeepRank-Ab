@@ -1,30 +1,16 @@
 # Pipeline Optimization TODO
 
-## Medium Priority
+## Completed
 
-### 1. Parallel Graph Prep
-**File**: `scripts/split_stageA_cpu.py` (lines 352-376)
+### 1. Parallel Graph Prep - DONE
+See `docs/improvements.md` for details.
 
-**Current**: Sequential PDB merging + FASTA writing in `build_merged_structure()` loop
-
-**Proposed**: Use `ProcessPoolExecutor` to parallelize across cores
-
-```python
-from concurrent.futures import ProcessPoolExecutor
-
-def prep_one_pdb(args):
-    pdb_path, heavy, light, antigen, merged_dir, fasta_dir = args
-    seqH, seqL, seqAg = build_merged_structure(...)
-    # Write FASTA
-    return seqH, seqL, seqAg, merged_pdb
-
-with ProcessPoolExecutor(max_workers=num_cores) as ex:
-    results = ex.map(prep_one_pdb, task_args)
-```
-
-**Expected gain**: 5-10%
+### 4. DataLoader Tuning - DONE
+See `docs/improvements.md` for details.
 
 ---
+
+## Medium Priority
 
 ### 2. Dynamic ESM Load Balancing
 **File**: `scripts/split_stageB_gpu.py` (lines 385-455)
@@ -45,19 +31,6 @@ with ProcessPoolExecutor(max_workers=num_cores) as ex:
 **Proposed**: Micro-batch by model to improve HMMER cache locality
 
 **Expected gain**: 5%
-
----
-
-### 4. DataLoader Tuning
-**File**: `scripts/split_stageB_gpu.py`
-
-**Current**: `num_workers=8`, `prefetch_factor=2` (PyTorch default)
-
-**Proposed**:
-- Increase `prefetch_factor` to 4 for better GPU utilization
-- Auto-tune `batch_size` based on GPU memory
-
-**Expected gain**: 5-15%
 
 ---
 
@@ -94,12 +67,12 @@ with ProcessPoolExecutor(max_workers=num_cores) as ex:
 
 ## Summary Table
 
-| Priority | Improvement | Effort | Expected Gain |
-|----------|-------------|--------|---------------|
-| Medium | Parallel graph prep | Low | 5-10% |
-| Medium | Dynamic ESM load balancing | Medium | 5-20% |
-| Medium | Batch annotation by model | Low | 5% |
-| Medium | DataLoader tuning | Low | 5-15% |
-| Low | Async I/O | Medium | 20-50% |
-| Low | Caching layer | High | 50-80% |
-| Low | Distributed inference | High | 2-8x |
+| Priority | Improvement | Effort | Expected Gain | Status |
+|----------|-------------|--------|---------------|--------|
+| ~~Medium~~ | ~~Parallel graph prep~~ | ~~Low~~ | ~~5-10%~~ | **DONE** |
+| Medium | Dynamic ESM load balancing | Medium | 5-20% | Pending |
+| Medium | Batch annotation by model | Low | 5% | Pending |
+| ~~Medium~~ | ~~DataLoader tuning~~ | ~~Low~~ | ~~5-15%~~ | **DONE** |
+| Low | Async I/O | Medium | 20-50% | Pending |
+| Low | Caching layer | High | 50-80% | Pending |
+| Low | Distributed inference | High | 2-8x | Pending |
