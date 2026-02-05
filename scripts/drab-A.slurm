@@ -40,7 +40,7 @@ export VORO_PROCESSORS=1
 export VORO_CHAIN_PARALLEL=0
 export OMP_NUM_THREADS=1
 export OMP_PROC_BIND=close
-export OMP_PLACES=core
+export OMP_PLACES=cores
 
 export TMPDIR="${SLURM_TMPDIR:-/tmp}"
 echo "=== Storage check ==="
