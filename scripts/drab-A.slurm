@@ -160,7 +160,9 @@ cleanup_monitor() {
 }
 
 trap cleanup_monitor EXIT
-start_monitor
+if [[ "${MAKE_SHARDS_ONLY:-0}" != "1" ]]; then
+  start_monitor
+fi
 
 # ============================================================
 # VORONOTA / BSA BACKEND CONFIGURATION
