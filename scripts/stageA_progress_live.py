@@ -81,6 +81,9 @@ def collect_shards(run_root: Path) -> List[dict]:
 
         n_list_pdbs = _count_lines(list_file)
         prog = _read_json(progress_file)
+        graph_prog = _read_json(shard_dir / "graph_progress.json")
+        graphs_done = graph_prog.get("graphs_done", 0) if graph_prog else 0
+        graphs_total = graph_prog.get("graphs_total", 0) if graph_prog else 0
 
         if done_marker.exists() and prog:
             results.append({
@@ -96,6 +99,8 @@ def collect_shards(run_root: Path) -> List[dict]:
                 "prep_fail": prog.get("prep_fail", 0),
                 "started_at": prog.get("started_at"),
                 "elapsed": _elapsed_str(prog.get("started_at")),
+                "graphs_done": graphs_done,
+                "graphs_total": graphs_total,
             })
         elif prog:
             results.append({
@@ -111,6 +116,8 @@ def collect_shards(run_root: Path) -> List[dict]:
                 "prep_fail": prog.get("prep_fail", 0),
                 "started_at": prog.get("started_at"),
                 "elapsed": _elapsed_str(prog.get("started_at")),
+                "graphs_done": graphs_done,
+                "graphs_total": graphs_total,
             })
         else:
             results.append({
@@ -126,6 +133,8 @@ def collect_shards(run_root: Path) -> List[dict]:
                 "prep_fail": 0,
                 "started_at": None,
                 "elapsed": "-",
+                "graphs_done": 0,
+                "graphs_total": 0,
             })
 
     return results
@@ -138,6 +147,12 @@ def format_prep(s: dict) -> str:
     if n_models == 0:
         return "-"
     done = s["prep_done"]
+    # Show graph-building progress when in "graphs" stage
+    if s["stage"] == "graphs" and s.get("graphs_total", 0) > 0:
+        gd = s["graphs_done"]
+        gt = s["graphs_total"]
+        pct = gd / gt * 100
+        return f"{gd}/{gt} ({pct:.0f}%)"
     if s["status"] == "done" or s["stage"] not in ("copy", "expand", "prep"):
         fail_str = f"  {s['prep_fail']} fail" if s["prep_fail"] else ""
         return f"{s['prep_ok']}/{n_models} ok{fail_str}"

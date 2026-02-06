@@ -231,6 +231,7 @@ def gen_graphs(
     n_cores: int,
     antigen_chainid: str = "B",
     tmp_base: Optional[Path] = None,
+    graph_progress_file: Optional[Path] = None,
 ):
     tmpdir = Path(tempfile.mkdtemp(prefix="drab_graph_", dir=str(tmp_base) if tmp_base else None))
     try:
@@ -247,6 +248,7 @@ def gen_graphs(
             use_voro=True,
             contact_features=True,
             embedding_path=None,
+            graph_progress_file=str(graph_progress_file) if graph_progress_file else None,
         )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -456,7 +458,8 @@ def run_stageA_one_shard(
     _write_progress(stage="graphs", **_prog)
     t3 = perf_counter()
     graphs_local = local_root / "graphs.h5"
-    gen_graphs(merged_dir, graphs_local, region_json, num_cores, antigen_chainid_for_graph, tmp_base)
+    gen_graphs(merged_dir, graphs_local, region_json, num_cores, antigen_chainid_for_graph, tmp_base,
+               graph_progress_file=shard_dir / "graph_progress.json")
     ensure_zero_embedding(graphs_local)
     graphs_s = perf_counter() - t3
 

@@ -71,46 +71,72 @@ def _worker_process_graph(pdb_path):
         return ('ERROR', pdb_path, str(e))
 
 
-def _writer_process(result_queue, outfile, total_count, use_tqdm=True):
+def _write_graph_progress(progress_file, done, total):
+    """Atomically write graph progress JSON."""
+    tmp = str(progress_file) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"graphs_done": done, "graphs_total": total}, f)
+    os.replace(tmp, str(progress_file))
+
+
+def _writer_process(result_queue, outfile, total_count, use_tqdm=True,
+                    progress_file=None):
     """
     Writer process: drain result queue and write graphs to HDF5.
     Runs continuously until receiving sentinel value.
     """
+    import time as _time
+
     graphs_written = 0
     errors = []
-    
+    processed = 0
+    last_progress_write = 0.0
+
     # Open HDF5 file once
     with h5py.File(outfile, 'w') as f5:
         if use_tqdm:
             pbar = tqdm(total=total_count, desc="Writing graphs", file=sys.stdout)
-        
+
         while True:
             result = result_queue.get()
-            
+
             # Sentinel: None means all work is done
             if result is None:
                 break
-            
+
             # Handle errors
             if isinstance(result, tuple) and result[0] == 'ERROR':
                 _, pdb_path, error_msg = result
                 errors.append((pdb_path, error_msg))
+                processed += 1
                 if use_tqdm:
                     pbar.update(1)
+                if progress_file and (_time.monotonic() - last_progress_write) >= 2.0:
+                    _write_graph_progress(progress_file, processed, total_count)
+                    last_progress_write = _time.monotonic()
                 continue
-            
+
             # Write graph to HDF5
             try:
                 result.nx2h5(f5)
                 graphs_written += 1
             except Exception as e:
                 errors.append((getattr(result, 'pdb', 'UNKNOWN'), str(e)))
-            
+
+            processed += 1
             if use_tqdm:
                 pbar.update(1)
-        
+
+            if progress_file and (_time.monotonic() - last_progress_write) >= 2.0:
+                _write_graph_progress(progress_file, processed, total_count)
+                last_progress_write = _time.monotonic()
+
         if use_tqdm:
             pbar.close()
+
+    # Write final progress
+    if progress_file:
+        _write_graph_progress(progress_file, processed, total_count)
     
     # Report errors if any
     if errors:
@@ -143,6 +169,7 @@ class GraphHDF5(object):
         contact_features: bool = True,
         antigen_chainid: str = 'A',
         use_voro: bool = False,
+        graph_progress_file=None,
     ):
         """Entry point that orchestrates graph construction and output."""
         # --- gather PDB files ---
@@ -217,12 +244,14 @@ class GraphHDF5(object):
                 use_tqdm=use_tqdm,
                 biopython=biopython,
                 region_map=self.region_map,
-                antigen_chainid=self.antigen_chainid
+                antigen_chainid=self.antigen_chainid,
+                graph_progress_file=graph_progress_file,
             )
         else:
             # Producer-consumer parallel pipeline
             self._parallel_pipeline(
-                pdbs, ref, outfile, nproc, use_tqdm, biopython
+                pdbs, ref, outfile, nproc, use_tqdm, biopython,
+                graph_progress_file=graph_progress_file,
             )
         
         # --- clean up temporary files ---
@@ -241,7 +270,8 @@ class GraphHDF5(object):
                 print(f"warning: embedding step failed; graphs are ready: {e}", flush=True)
     
     
-    def _parallel_pipeline(self, pdbs, ref, outfile, nproc, use_tqdm, biopython):
+    def _parallel_pipeline(self, pdbs, ref, outfile, nproc, use_tqdm, biopython,
+                           graph_progress_file=None):
         """
         Producer-consumer pipeline:
         - Workers pull PDB paths from work queue, compute graphs, put on result queue
@@ -267,7 +297,8 @@ class GraphHDF5(object):
         # Start writer process
         writer = Process(
             target=_writer_process,
-            args=(result_queue, outfile, len(pdbs), use_tqdm)
+            args=(result_queue, outfile, len(pdbs), use_tqdm,
+                  graph_progress_file)
         )
         writer.start()
         
@@ -308,17 +339,23 @@ class GraphHDF5(object):
             use_tqdm=True,
             biopython=False,
             region_map=None,
-            antigen_chainid='A'
+            antigen_chainid='A',
+            graph_progress_file=None,
         ):
         """Generate all graphs sequentially (nproc=1 mode)."""
+        import time as _time
+
         graphs = []
-        
+        total_count = len(pdbs)
+        processed = 0
+        last_progress_write = 0.0
+
         if use_tqdm:
             desc = "{:25s}".format("   create HDF5")
             lst = tqdm(pdbs, desc=desc, file=sys.stdout)
         else:
             lst = pdbs
-        
+
         for name in lst:
             try:
                 g = self._get_one_graph(
@@ -331,11 +368,16 @@ class GraphHDF5(object):
                 )
                 if g is None:
                     print(f"[WARN] Skipped graph for {name}")
+                    processed += 1
                     continue
                 graphs.append(g)
             except Exception as e:
                 print(f"error computing graph {name}: {e}")
-        
+            processed += 1
+            if graph_progress_file and (_time.monotonic() - last_progress_write) >= 2.0:
+                _write_graph_progress(graph_progress_file, processed, total_count)
+                last_progress_write = _time.monotonic()
+
         with h5py.File(outfile, "w") as f5:
             for g in graphs:
                 if g is None:
@@ -344,6 +386,10 @@ class GraphHDF5(object):
                     g.nx2h5(f5)
                 except Exception as e:
                     print(f"error writing graph {getattr(g,'pdb','UNKNOWN')}: {e}")
+
+        # Write final progress
+        if graph_progress_file:
+            _write_graph_progress(graph_progress_file, processed, total_count)
     
     
     def _get_one_graph(self, name, ref, biopython=False, region_map=None, antigen_chainid='A', embedding_path=None):
