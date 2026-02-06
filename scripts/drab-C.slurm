@@ -190,6 +190,12 @@ print(f"✓ Wrote: {out_tsv}")
 print(f"✓ Stats: {out_stats}")
 PY
 
+# Copy predictions TSV and stats to run root
+cp "${OUT_TSV}" "${RUN_ROOT}/predictions.tsv.gz"
+cp "${OUT_STATS}" "${RUN_ROOT}/stats.json"
+echo "[StageC] ✓ predictions.tsv.gz -> ${RUN_ROOT}/"
+echo "[StageC] ✓ stats.json -> ${RUN_ROOT}/"
+
 # ------------------------------------------------------------
 # 4) Compute metrics: summarize, plot, copy to run root
 # ------------------------------------------------------------
