@@ -1,9 +1,4 @@
-# Select voronota binary for contact area computation.
-# VORONOTA_BINARY options:
-#   - "voronota"     (default) - legacy v1.28, additive tessellation, validated
-#   - "voronota_129" - v1.29, additive tessellation
-#   - "voronota-lt"  - radical tessellation, faster but less accurate
-# Legacy USE_VORONOTA_LT is still supported for backwards compatibility.
+# Voronota contact area computation using legacy two-step pipeline.
 #
 # OpenMP threading for voronota (v1.29+ compiled with -qopenmp):
 #   - VORO_OMP_THREADS: OpenMP threads per voronota subprocess (default: 1)
@@ -11,20 +6,9 @@
 #   - Use with reduced NUM_CORES to avoid oversubscription:
 #       NUM_CORES=16, VORO_OMP_THREADS=2 -> 32 total threads
 import os
-
-def _get_voronota_binary():
-    """Determine which voronota binary to use."""
-    binary = os.environ.get("VORONOTA_BINARY", "").strip().lower()
-    if binary:
-        return binary
-    # Fallback to legacy USE_VORONOTA_LT for backwards compatibility
-    use_lt = os.environ.get("USE_VORONOTA_LT", "0").strip()
-    if use_lt not in ("0", "false", "no", "off", ""):
-        return "voronota-lt"
-    return "voronota"
-
-_VORONOTA_BINARY = _get_voronota_binary()
-_USE_LT = _VORONOTA_BINARY == "voronota-lt"
+import subprocess
+from pathlib import Path
+import numpy as np
 
 
 def _get_voro_subprocess_env():
@@ -38,11 +22,6 @@ def _get_voro_subprocess_env():
     voro_threads = os.environ.get("VORO_OMP_THREADS", "1")
     env["OMP_NUM_THREADS"] = voro_threads
     return env
-
-
-import subprocess
-from pathlib import Path
-import numpy as np
 
 
 class VoronotaAreasLegacy:
@@ -118,18 +97,10 @@ class VoronotaAreasLegacy:
 
     @staticmethod
     def get_voronota_executable() -> str:
-        """Get path to voronota binary based on VORONOTA_BINARY env var."""
+        """Get path to voronota binary."""
         script_dir = Path(__file__).resolve().parent
         root_dir = script_dir.parent
-        voronota_dir = root_dir / "tools" / "voronota"
-
-        # Map VORONOTA_BINARY to actual binary name
-        binary_map = {
-            "voronota": "voronota",
-            "voronota_129": "voronota_129",
-        }
-        binary_name = binary_map.get(_VORONOTA_BINARY, "voronota")
-        return str(voronota_dir / binary_name)
+        return str(root_dir / "tools" / "voronota" / "voronota")
 
     @staticmethod
     def run_voro_contacts(pdb_fpath, voronota_exec) -> tuple[bytes, bytes]:
@@ -163,8 +134,4 @@ class VoronotaAreasLegacy:
         return balls_outputs, contacts_outputs
 
 
-# Conditional export based on USE_VORONOTA_LT environment variable
-if _USE_LT:
-    from tools.VoroContacts import VoronotaAreas
-else:
-    VoronotaAreas = VoronotaAreasLegacy
+VoronotaAreas = VoronotaAreasLegacy

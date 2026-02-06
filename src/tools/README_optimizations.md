@@ -307,7 +307,3 @@ for i, res in enumerate(residues):
 **Result:** For 200-residue chains, reduces file loads from 200 to 2.
 
 ---
-
-## Related Documentation
-
-- [README_voronota.md](README_voronota.md) - Voronota-LT integration and BSA optimization

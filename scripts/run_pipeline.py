@@ -255,8 +255,6 @@ def build_env(cfg: PipelineConfig, stage: str, **overrides) -> Dict[str, str]:
         env["MIN_PER_SHARD"] = str(sa.get("min_per_shard", 10))
         env["MAX_PER_SHARD"] = str(sa.get("max_per_shard", 100))
         env["GLOB_PAT"] = sa.get("glob", "**/*.pdb")
-        env["VORONOTA_BINARY"] = sa.get("voronota_binary", "voronota_129")
-        env["USE_FREESASA"] = str(sa.get("use_freesasa", 1))
         env["VORO_OMP_THREADS"] = str(sa.get("voro_omp_threads", 1))
 
     elif stage == "b":

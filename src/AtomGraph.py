@@ -364,7 +364,7 @@ class AtomGraph(Graph):
         Compute Voronota contact area between two atoms (nodes).
         Each node is (chainID, resSeq, resName, atomID, atomName).
 
-        Key format for voronota-lt: (chainID, resSeq, resName, atomName)
+        Key format: (chainID, resSeq, resName, atomName)
         """
         try:
             # node format: (chainID, resSeq, resName, atomID, atomName)

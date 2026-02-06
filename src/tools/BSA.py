@@ -1,40 +1,18 @@
 """
 BSA (Buried Surface Area) computation module.
 
-Supports two backends controlled by the USE_FREESASA environment variable:
-  - USE_FREESASA=1 (default): Use freesasa library (original implementation)
-  - USE_FREESASA=0: Use voronota-lt via VoroContacts (faster, but may differ slightly)
+Uses the freesasa library for SASA calculations.
 
 Example:
-    export USE_FREESASA=1   # Use freesasa (default, scientifically validated)
-    export USE_FREESASA=0   # Use voronota-lt (faster)
+    >>> bsa = BSA('1AK4.pdb')
+    >>> bsa.get_structure()
+    >>> bsa.get_contact_residue_sasa()
+    >>> bsa.sql.close()
 """
 
-import os
 import numpy as np
 from pdb2sql.interface import interface
 
-
-def _use_freesasa() -> bool:
-    """Check if freesasa backend should be used (default: True)."""
-    val = os.environ.get("USE_FREESASA", "1").strip().lower()
-    return val not in ("0", "false", "no", "off")
-
-
-# Lazy import for voronota-lt backend
-_VoroContacts_BSA = None
-
-
-def _get_voronota_bsa():
-    """Lazily import BSA from VoroContacts to avoid circular imports."""
-    global _VoroContacts_BSA
-    if _VoroContacts_BSA is None:
-        from tools.VoroContacts import BSA as VoroBSA
-        _VoroContacts_BSA = VoroBSA
-    return _VoroContacts_BSA
-
-
-# Import freesasa if available
 _freesasa = None
 try:
     import freesasa as _freesasa
@@ -158,24 +136,13 @@ class BSA_Freesasa(object):
 
 class BSA:
     """
-    BSA computation with configurable backend.
+    BSA computation wrapper.
 
-    Backend selection via USE_FREESASA environment variable:
-      - USE_FREESASA=1 (default): Use freesasa library (original, validated)
-      - USE_FREESASA=0: Use voronota-lt via VoroContacts (faster)
-
-    This is a wrapper that delegates to the appropriate implementation.
+    Delegates to BSA_Freesasa for buried surface area calculation.
     """
 
     def __new__(cls, pdb_data, sqldb=None, chainA='A', chainB='B', **kwargs):
         """
-        Factory that returns the appropriate BSA implementation.
-
-        Returns:
-            BSA_Freesasa or VoroContacts.BSA instance depending on USE_FREESASA
+        Factory that returns a BSA_Freesasa instance.
         """
-        if _use_freesasa():
-            return BSA_Freesasa(pdb_data, sqldb=sqldb, chainA=chainA, chainB=chainB)
-        else:
-            VoroBSA = _get_voronota_bsa()
-            return VoroBSA(pdb_data, sqldb=sqldb, chainA=chainA, chainB=chainB, **kwargs)
+        return BSA_Freesasa(pdb_data, sqldb=sqldb, chainA=chainA, chainB=chainB)

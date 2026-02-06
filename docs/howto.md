@@ -77,8 +77,6 @@ stage_a:
   glob: "**/*.pdb"          # Glob pattern to find PDBs
 
   # Voronota settings
-  voronota_binary: voronota_129   # voronota | voronota_129 | voronota-lt
-  use_freesasa: 1                 # 1 = freesasa, 0 = voronota-lt for BSA
   voro_omp_threads: 1             # OpenMP threads per voronota call
 ```
 
