@@ -230,22 +230,12 @@ def print_table(run_root: Path, shards: List[dict], max_rows: int = 0) -> None:
         graphed = sum(s["prep_ok"] for s in shards if s["stage"] in _past_graph)
         clustered = sum(s["prep_ok"] for s in shards if s["stage"] in _past_clust)
 
-        # Include partial progress for in-flight stages
-        prepping = sum(s["prep_ok"] for s in shards if s["stage"] == "prep")
-        graphing = sum(s["graphs_done"] for s in shards if s["stage"] == "graphs")
-
-        def _fmt(done: int, partial: int, total: int) -> str:
-            if partial:
-                return f"{done}+{partial}/{total}"
-            return f"{done}/{total}"
-
         fail = sum(s["prep_fail"] for s in shards)
         fail_str = f"  ({fail} fail)" if fail else ""
 
-        print(f"PDBs:   Prepped {_fmt(prepped, prepping, total_models)}   "
-              f"Annotated {annotated}   "
-              f"Graphed {_fmt(graphed, graphing, total_models)}   "
-              f"Clustered {clustered}{fail_str}")
+        print(f"Prepped: {prepped}  Annotated: {annotated}  "
+              f"Graphed: {graphed}  Clustered: {clustered}  "
+              f"(of {total_models}){fail_str}")
     else:
         total_inputs = sum(s["n_inputs"] for s in shards)
         print(f"PDBs:   {total_inputs} inputs across shards (models not yet expanded)")
