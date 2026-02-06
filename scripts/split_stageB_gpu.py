@@ -4,13 +4,24 @@ from __future__ import annotations
 """
 split_stageB_gpu.py
 
-Stage B (GPU): for each shard produced by Stage A CPU:
-- Verify Stage A done sentinel (STAGEA_DONE)
-- Load StageA graph (graphs.h5) and gzipped manifest (manifest.tsv.gz)
-- Compute ESM scalar embeddings sharded across multiple GPUs
-- Inject embeddings into the graph HDF5
-- Run DeepRank-Ab inference
-- Publish predictions + DONE sentinel into preds/
+Stage B (GPU): process shards produced by Stage A CPU using batch ESM.
+
+When processing multiple shards (--start-index/--count), sequences from all
+pending shards are merged and ESM embeddings are computed in a single pass
+across all GPUs. This reduces ESM model loads from S*G to G (for S shards
+on G GPUs). Per-shard inject + infer + publish then runs sequentially,
+preserving per-shard DONE sentinels for spot instance resilience.
+
+Three-phase flow:
+  Phase 0: Filter targets — skip shards already DONE or missing STAGEA_DONE
+  Phase 1: Collect sequences from all pending shards (deduplicate by label)
+  Phase 2: Batch ESM — one call to run_sharded_embeddings_subprocess()
+  Phase 3: Per-shard inject + infer + publish with DONE checkpoint per shard
+
+Spot instance resilience:
+  - Preempted during Phase 2: all ESM work lost, but ran only once not per-shard
+  - Preempted during Phase 3: completed shards have DONE sentinels; on restart
+    is_done() skips them. Worst case = 1 shard's inject+infer lost (~seconds)
 
 Assumed Stage A layout:
 $RUN_ROOT/shards/shard_000000/
@@ -129,6 +140,26 @@ def _write_progress_B(
     })
 
 
+def _write_progress_B_batch(
+    preds_root: Path,
+    stage: str,
+    shard_ids: List[str],
+    n_total_sequences: int,
+    started_at: str,
+    current_shard: str = "",
+) -> None:
+    atomic_write_json(preds_root / "progress_batch_esm.json", {
+        "shard_ids": shard_ids,
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "stage": stage,
+        "n_total_sequences": n_total_sequences,
+        "current_shard": current_shard,
+        "started_at": started_at,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    })
+
+
 def getenv_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, str(default)))
@@ -154,6 +185,15 @@ class ShardResult:
     timings: Dict[str, float] = dc.field(default_factory=dict)
     notes: List[str] = dc.field(default_factory=list)
     error: Optional[str] = None
+
+
+@dc.dataclass
+class ShardSeqBatch:
+    """Merged sequences from multiple data shards for batch ESM processing."""
+    all_records: List[SeqRecord]
+    shard_to_records: Dict[str, List[SeqRecord]]
+    shard_to_count: Dict[str, int]
+    shard_ids: List[str]
 
 
 # ----------------------------
@@ -257,6 +297,41 @@ def load_sequences_for_shard(shard_dir: Path) -> List[SeqRecord]:
             return read_manifest_tsv(m2)
         raise FileNotFoundError(f"{shard_dir}: missing manifest.tsv.gz")
     return read_manifest_tsv(m)
+
+
+def collect_sequences_for_shards(
+    shards_root: Path,
+    shard_ids: List[str],
+) -> ShardSeqBatch:
+    """Load manifests from all pending shards and merge into one ShardSeqBatch.
+
+    Deduplicates by label (keeps first occurrence). This is unlikely with
+    properly partitioned shards but safe.
+    """
+    shard_to_records: Dict[str, List[SeqRecord]] = {}
+    shard_to_count: Dict[str, int] = {}
+    seen_labels: set = set()
+    all_records: List[SeqRecord] = []
+
+    for sid in shard_ids:
+        shard_dir = shards_root / f"shard_{sid}"
+        records = load_sequences_for_shard(shard_dir)
+        shard_records: List[SeqRecord] = []
+        for r in records:
+            if r.label not in seen_labels:
+                seen_labels.add(r.label)
+                all_records.append(r)
+                shard_records.append(r)
+        shard_to_records[sid] = shard_records
+        shard_to_count[sid] = len(shard_records)
+        log.info(f"  shard {sid}: {len(records)} sequences ({len(shard_records)} unique)")
+
+    return ShardSeqBatch(
+        all_records=all_records,
+        shard_to_records=shard_to_records,
+        shard_to_count=shard_to_count,
+        shard_ids=list(shard_ids),
+    )
 
 
 # ----------------------------
@@ -739,6 +814,111 @@ def process_one_shard(
     return ShardResult(shard_id=shard_id, status="ok", wall_s=perf_counter() - t0, timings=timings)
 
 
+def process_shard_post_esm(
+    run_root: Path,
+    shards_root: Path,
+    preds_root: Path,
+    shard_id: str,
+    part_h5s: List[Path],
+    label_to_shard: Dict[str, int],
+    model_path: Path,
+    device: str,
+    num_cores: int,
+    dl_workers: int,
+    batch_size: int,
+    prefetch_factor: int,
+    local_base: Path,
+    started_at: str,
+    n_sequences: int,
+) -> ShardResult:
+    """Per-shard post-ESM work: copy graph -> inject embeddings -> infer -> publish."""
+    t0 = perf_counter()
+    timings: Dict[str, float] = {}
+
+    shard_dir = shards_root / f"shard_{shard_id}"
+    pred_pub, done_pub, failed_pub, meta_pub = stageB_paths(preds_root, shard_id)
+
+    # Clean up stale sentinels
+    for p in (failed_pub, done_pub):
+        if p.exists():
+            try:
+                p.unlink()
+            except Exception:
+                pass
+
+    _bprog = dict(preds_root=preds_root, shard_id=shard_id, started_at=started_at, n_sequences=n_sequences)
+
+    workdir = safe_mkdir(local_base / f"stageB_shard_{shard_id}")
+
+    graph_src = shard_dir / "graphs.h5"
+    if not graph_src.is_file():
+        raise FileNotFoundError(f"{shard_dir}: missing graphs.h5")
+
+    # Copy graph locally
+    graph_local = workdir / "graphs.h5"
+    t_copy0 = perf_counter()
+    shutil.copy2(graph_src, graph_local)
+    timings["stage_graph_s"] = perf_counter() - t_copy0
+    _write_progress_B(stage="inject", **_bprog)
+
+    # Inject embeddings from consolidated part_h5s
+    t_inj0 = perf_counter()
+    missing_labels, oob = inject_embeddings_from_parts(graph_local, part_h5s, label_to_shard)
+    timings["inject_s"] = perf_counter() - t_inj0
+    if missing_labels:
+        log.warning(f"[{shard_id}] injection: missing_labels={missing_labels}")
+    if oob:
+        log.warning(f"[{shard_id}] injection: oob_residue_indices={oob}")
+
+    # Inference
+    _write_progress_B(stage="infer", **_bprog)
+    t_inf0 = perf_counter()
+    pred_local = workdir / "pred.h5"
+    predict(
+        graph_h5=graph_local,
+        model_path=model_path,
+        out_pred_h5=pred_local,
+        device=device,
+        dl_workers=dl_workers,
+        batch_size=batch_size,
+        num_cores=num_cores,
+        prefetch_factor=prefetch_factor,
+    )
+    timings["infer_s"] = perf_counter() - t_inf0
+
+    # Publish
+    _write_progress_B(stage="publish", **_bprog)
+    t_pub0 = perf_counter()
+    atomic_copy(pred_local, pred_pub)
+    atomic_write_text(done_pub, "ok\n")
+    timings["publish_s"] = perf_counter() - t_pub0
+
+    meta = {
+        "run_root": str(run_root),
+        "shard_id": shard_id,
+        "graph_src": str(graph_src),
+        "pred_path": str(pred_pub),
+        "done_path": str(done_pub),
+        "model_path": str(model_path),
+        "device": device,
+        "esm_model": ESM_MODEL,
+        "esm_batch_mode": True,
+        "missing_labels": int(missing_labels),
+        "oob_residue_indices": int(oob),
+        "timings": timings,
+        "generated_at": datetime.now().isoformat(),
+    }
+    atomic_write_text(meta_pub, json.dumps(meta, indent=2) + "\n")
+    _write_progress_B(stage="done", **_bprog)
+
+    try:
+        shutil.rmtree(workdir, ignore_errors=True)
+    except Exception:
+        pass
+
+    return ShardResult(shard_id=shard_id, status="ok", wall_s=perf_counter() - t0, timings=timings)
+
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -849,6 +1029,11 @@ def main() -> int:
 
     t_all0 = perf_counter()
     results: List[ShardResult] = []
+
+    # ------------------------------------------------------------------
+    # PHASE 0: Filter targets — skip shards already DONE or missing STAGEA_DONE
+    # ------------------------------------------------------------------
+    pending_sids: List[str] = []
     for sid in targets:
         if not stageA_done_path(shards_root, sid).is_file():
             results.append(ShardResult(shard_id=sid, status="failed", wall_s=0.0, error="missing STAGEA_DONE"))
@@ -859,42 +1044,99 @@ def main() -> int:
             results.append(ShardResult(shard_id=sid, status="skipped", wall_s=0.0, notes=["already_done"]))
             continue
 
-        log.info(f"=== SHARD {sid} ===")
-        try:
-            r = process_one_shard(
-                run_root=run_root,
-                shards_root=shards_root,
-                preds_root=preds_root,
-                logs_root=logs_root,
-                shard_id=sid,
-                model_path=model_path,
-                device=args.device,
-                num_cores=int(args.num_cores),
-                dl_workers=int(args.dl_workers),
-                batch_size=int(args.batch_size),
-                prefetch_factor=int(args.prefetch_factor),
-                esm_gpus=esm_gpus,
-                esm_toks_per_batch=esm_toks,
-                esm_scalar_dtype=esm_dtype,
-                local_base=local_base,
+        pending_sids.append(sid)
+
+    if not pending_sids:
+        log.info("All target shards already done or missing STAGEA_DONE. Nothing to do.")
+    else:
+        log.info(f"PENDING:    {len(pending_sids)} shards: {pending_sids}")
+        started_at = datetime.now().isoformat(timespec="seconds")
+        _batch_prog = dict(preds_root=preds_root, shard_ids=pending_sids,
+                           n_total_sequences=0, started_at=started_at)
+
+        # ------------------------------------------------------------------
+        # PHASE 1: Collect sequences from all pending shards
+        # ------------------------------------------------------------------
+        log.info("--- Phase 1: collecting sequences ---")
+        _write_progress_B_batch(stage="collect_seqs", **_batch_prog)
+        t_collect0 = perf_counter()
+        seq_batch = collect_sequences_for_shards(shards_root, pending_sids)
+        t_collect = perf_counter() - t_collect0
+        _batch_prog["n_total_sequences"] = len(seq_batch.all_records)
+        log.info(f"  total unique sequences: {len(seq_batch.all_records)} (collected in {t_collect:.1f}s)")
+
+        if not seq_batch.all_records:
+            log.warning("No sequences found across pending shards — skipping ESM.")
+            for sid in pending_sids:
+                results.append(ShardResult(shard_id=sid, status="failed", wall_s=0.0, error="no sequences in manifest"))
+        else:
+            # ------------------------------------------------------------------
+            # PHASE 2: Batch ESM — ONCE for all shards
+            # ------------------------------------------------------------------
+            log.info("--- Phase 2: batch ESM embeddings ---")
+            _write_progress_B_batch(stage="esm", **_batch_prog)
+
+            emb_dir = safe_mkdir(local_base / "batch_embeddings")
+            t_esm0 = perf_counter()
+            part_h5s, esm_crit_s, label_to_shard = run_sharded_embeddings_subprocess(
+                embeddings_dir=emb_dir,
+                records=seq_batch.all_records,
+                n_gpus=esm_gpus,
+                toks_per_batch=esm_toks,
+                scalar_dtype=esm_dtype,
+                python_exe=sys.executable,
+                script_path=Path(__file__).resolve(),
             )
-            results.append(r)
-            log.info(f"[{sid}] status={r.status} wall={r.wall_s:.1f}s")
-        except Exception as e:
-            tb = traceback.format_exc()
-            pred_pub, done_pub, failed_pub, _meta_pub = stageB_paths(preds_root, sid)
-            msg = f"FAILED shard {sid}: {e}\n\n{tb}\n"
-            try:
-                atomic_write_text(failed_pub, msg)
-            except Exception:
-                pass
-            if done_pub.exists():
+            t_esm_total = perf_counter() - t_esm0
+            log.info(f"  ESM done: crit={esm_crit_s:.1f}s total={t_esm_total:.1f}s")
+
+            # ------------------------------------------------------------------
+            # PHASE 3: Per-shard inject + infer + publish
+            # ------------------------------------------------------------------
+            log.info("--- Phase 3: per-shard inject + infer + publish ---")
+            _write_progress_B_batch(stage="per_shard", **_batch_prog)
+
+            for sid in pending_sids:
+                n_seq = seq_batch.shard_to_count.get(sid, 0)
+                log.info(f"=== SHARD {sid} ({n_seq} seqs) ===")
+                _write_progress_B_batch(stage="per_shard", current_shard=sid, **_batch_prog)
                 try:
-                    done_pub.unlink()
-                except Exception:
-                    pass
-            results.append(ShardResult(shard_id=sid, status="failed", wall_s=0.0, error=str(e), notes=["see_FAILED_sentinel"]))
-            log.error(f"[{sid}] FAILED: {e}")
+                    r = process_shard_post_esm(
+                        run_root=run_root,
+                        shards_root=shards_root,
+                        preds_root=preds_root,
+                        shard_id=sid,
+                        part_h5s=part_h5s,
+                        label_to_shard=label_to_shard,
+                        model_path=model_path,
+                        device=args.device,
+                        num_cores=int(args.num_cores),
+                        dl_workers=int(args.dl_workers),
+                        batch_size=int(args.batch_size),
+                        prefetch_factor=int(args.prefetch_factor),
+                        local_base=local_base,
+                        started_at=started_at,
+                        n_sequences=n_seq,
+                    )
+                    results.append(r)
+                    log.info(f"[{sid}] status={r.status} wall={r.wall_s:.1f}s")
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    _pred_pub, done_pub, failed_pub, _meta_pub = stageB_paths(preds_root, sid)
+                    msg = f"FAILED shard {sid}: {e}\n\n{tb}\n"
+                    try:
+                        atomic_write_text(failed_pub, msg)
+                    except Exception:
+                        pass
+                    if done_pub.exists():
+                        try:
+                            done_pub.unlink()
+                        except Exception:
+                            pass
+                    results.append(ShardResult(shard_id=sid, status="failed", wall_s=0.0, error=str(e), notes=["see_FAILED_sentinel"]))
+                    log.error(f"[{sid}] FAILED: {e}")
+
+            _write_progress_B_batch(stage="done", **_batch_prog)
 
     wall_all = perf_counter() - t_all0
 
