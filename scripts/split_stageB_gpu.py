@@ -1059,6 +1059,11 @@ def main() -> int:
         # ------------------------------------------------------------------
         log.info("--- Phase 1: collecting sequences ---")
         _write_progress_B_batch(stage="collect_seqs", **_batch_prog)
+        # Write per-shard progress so the live viewer shows activity
+        for sid in pending_sids:
+            _write_progress_B(preds_root=preds_root, shard_id=sid,
+                              stage="collect_seqs", n_sequences=0,
+                              started_at=started_at)
         t_collect0 = perf_counter()
         seq_batch = collect_sequences_for_shards(shards_root, pending_sids)
         t_collect = perf_counter() - t_collect0
@@ -1075,6 +1080,12 @@ def main() -> int:
             # ------------------------------------------------------------------
             log.info("--- Phase 2: batch ESM embeddings ---")
             _write_progress_B_batch(stage="esm", **_batch_prog)
+            # Update per-shard progress to reflect ESM phase
+            for sid in pending_sids:
+                n_seq = seq_batch.shard_to_count.get(sid, 0)
+                _write_progress_B(preds_root=preds_root, shard_id=sid,
+                                  stage="esm", n_sequences=n_seq,
+                                  started_at=started_at)
 
             emb_dir = safe_mkdir(local_base / "batch_embeddings")
             t_esm0 = perf_counter()

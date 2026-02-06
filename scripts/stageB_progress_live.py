@@ -136,7 +136,7 @@ def collect_shards(run_root: Path) -> List[dict]:
     return results
 
 
-def print_table(run_root: Path, shards: List[dict]) -> None:
+def print_table(run_root: Path, shards: List[dict], preds_dir: Path) -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"StageB progress   {now}   RUN_ROOT: {run_root}")
     print()
@@ -175,6 +175,16 @@ def print_table(run_root: Path, shards: List[dict]) -> None:
         pct = done_seqs / total_seqs * 100
         print(f"Seqs:   {done_seqs}/{total_seqs} done ({pct:.1f}%)")
 
+    # Show batch ESM status if available
+    batch_prog = _read_json(preds_dir / "progress_batch_esm.json")
+    if batch_prog:
+        bstage = batch_prog.get("stage", "?")
+        bseqs = batch_prog.get("n_total_sequences", 0)
+        bhost = _short_host(batch_prog.get("hostname", "?"))
+        cur = batch_prog.get("current_shard", "")
+        cur_str = f"  shard={cur}" if cur else ""
+        print(f"Batch:  stage={bstage}  seqs={bseqs}  host={bhost}{cur_str}")
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Live progress viewer for Stage B shards")
@@ -188,18 +198,20 @@ def main() -> int:
         print(f"ERROR: {run_root} is not a directory", file=sys.stderr)
         return 1
 
+    preds_dir = run_root / "preds"
+
     if args.watch > 0:
         try:
             while True:
                 os.system("clear" if os.name != "nt" else "cls")
                 shards = collect_shards(run_root)
-                print_table(run_root, shards)
+                print_table(run_root, shards, preds_dir)
                 time.sleep(args.watch)
         except KeyboardInterrupt:
             print()
     else:
         shards = collect_shards(run_root)
-        print_table(run_root, shards)
+        print_table(run_root, shards, preds_dir)
 
     return 0
 
