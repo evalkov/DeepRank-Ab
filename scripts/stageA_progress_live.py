@@ -89,7 +89,7 @@ def collect_shards(run_root: Path) -> List[dict]:
             results.append({
                 "shard_id": sid,
                 "status": "done",
-                "pid": prog.get("pid", "-"),
+                "jobid": prog.get("jobid", ""),
                 "hostname": prog.get("hostname", "-"),
                 "stage": "done",
                 "n_inputs": prog.get("n_inputs", n_list_pdbs),
@@ -106,7 +106,7 @@ def collect_shards(run_root: Path) -> List[dict]:
             results.append({
                 "shard_id": sid,
                 "status": "running",
-                "pid": prog.get("pid", "-"),
+                "jobid": prog.get("jobid", ""),
                 "hostname": prog.get("hostname", "-"),
                 "stage": prog.get("stage", "?"),
                 "n_inputs": prog.get("n_inputs", n_list_pdbs),
@@ -123,7 +123,7 @@ def collect_shards(run_root: Path) -> List[dict]:
             results.append({
                 "shard_id": sid,
                 "status": "pending",
-                "pid": "-",
+                "jobid": "",
                 "hostname": "-",
                 "stage": "pending",
                 "n_inputs": n_list_pdbs,
@@ -164,21 +164,23 @@ def format_prep(s: dict) -> str:
 def _select_visible(shards: List[dict], max_rows: int) -> tuple:
     """Pick the most interesting shards to display, up to max_rows.
 
-    Priority: failed/running first, then done, then pending.
-    Visible rows keep their original shard-ID order.
+    Display order: running/failed (oldest first), then done, then pending.
     Returns (visible_list, hidden_list).
     """
-    if max_rows <= 0 or len(shards) <= max_rows:
-        return shards, []
+    # Sort into groups
+    running = [s for s in shards if s["status"] in ("running", "failed")]
+    done = [s for s in shards if s["status"] == "done"]
+    pending = [s for s in shards if s["status"] in ("pending", "waiting_A")]
 
-    _PRIO = {"failed": 0, "running": 0, "done": 1, "pending": 2, "waiting_A": 2}
-    indexed = [(i, _PRIO.get(s["status"], 2), s) for i, s in enumerate(shards)]
-    indexed.sort(key=lambda x: (x[1], x[0]))
+    # Oldest running first (earliest started_at = longest elapsed)
+    running.sort(key=lambda s: s.get("started_at") or "9")
 
-    chosen = {x[0] for x in indexed[:max_rows]}
-    visible = [s for i, s in enumerate(shards) if i in chosen]
-    hidden = [s for i, s in enumerate(shards) if i not in chosen]
-    return visible, hidden
+    ordered = running + done + pending
+
+    if max_rows <= 0 or len(ordered) <= max_rows:
+        return ordered, []
+
+    return ordered[:max_rows], ordered[max_rows:]
 
 
 def print_table(run_root: Path, shards: List[dict], max_rows: int = 0) -> None:
@@ -189,15 +191,15 @@ def print_table(run_root: Path, shards: List[dict], max_rows: int = 0) -> None:
     visible, hidden = _select_visible(shards, max_rows)
 
     # Header
-    hdr = f"{'Shard':<8}{'PID':<8}{'Host':<18}{'Stage':<12}{'Progress':<18}{'Elapsed':<10}"
+    hdr = f"{'Shard':<8}{'JobID':<14}{'Host':<18}{'Stage':<12}{'Progress':<18}{'Elapsed':<10}"
     print(hdr)
     print("-" * len(hdr))
 
     for s in visible:
-        pid = str(s["pid"]) if s["pid"] != "-" else "-"
+        jobid = s.get("jobid") or "-"
         host = _short_host(str(s["hostname"])) if s["hostname"] != "-" else "-"
         prep = format_prep(s)
-        print(f"{s['shard_id']:<8}{pid:<8}{host:<18}{s['stage']:<12}{prep:<18}{s['elapsed']:<10}")
+        print(f"{s['shard_id']:<8}{jobid:<14}{host:<18}{s['stage']:<12}{prep:<18}{s['elapsed']:<10}")
 
     if hidden:
         counts: Dict[str, int] = {}

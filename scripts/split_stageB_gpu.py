@@ -129,9 +129,13 @@ def _write_progress_B(
     n_sequences: int,
     started_at: str,
 ) -> None:
+    jid = os.environ.get("SLURM_JOB_ID", "")
+    tid = os.environ.get("SLURM_ARRAY_TASK_ID", "")
+    jobid = f"{jid}_{tid}" if jid and tid else jid or ""
     atomic_write_json(preds_root / f"progress_shard_{shard_id}.json", {
         "shard_id": shard_id,
         "pid": os.getpid(),
+        "jobid": jobid,
         "hostname": socket.gethostname(),
         "stage": stage,
         "n_sequences": n_sequences,
