@@ -34,6 +34,14 @@ def _count_lines(path: Path) -> int:
         return 0
 
 
+def _short_host(hostname: str, max_len: int = 16) -> str:
+    """Strip domain suffix and truncate to max_len."""
+    short = hostname.split(".")[0] if "." in hostname else hostname
+    if len(short) > max_len:
+        short = short[:max_len - 1] + "~"
+    return short
+
+
 def _elapsed_str(started_at: Optional[str]) -> str:
     if not started_at:
         return "-"
@@ -142,15 +150,15 @@ def print_table(run_root: Path, shards: List[dict]) -> None:
     print()
 
     # Header
-    hdr = f"{'Shard':<8}{'PID':<8}{'Host':<12}{'Stage':<12}{'Prep':<18}{'Elapsed':<10}"
+    hdr = f"{'Shard':<8}{'PID':<8}{'Host':<18}{'Stage':<12}{'Prep':<18}{'Elapsed':<10}"
     print(hdr)
     print("-" * len(hdr))
 
     for s in shards:
         pid = str(s["pid"]) if s["pid"] != "-" else "-"
-        host = str(s["hostname"]) if s["hostname"] != "-" else "-"
+        host = _short_host(str(s["hostname"])) if s["hostname"] != "-" else "-"
         prep = format_prep(s)
-        print(f"{s['shard_id']:<8}{pid:<8}{host:<12}{s['stage']:<12}{prep:<18}{s['elapsed']:<10}")
+        print(f"{s['shard_id']:<8}{pid:<8}{host:<18}{s['stage']:<12}{prep:<18}{s['elapsed']:<10}")
 
     print()
 
