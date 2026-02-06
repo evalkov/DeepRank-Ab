@@ -27,9 +27,11 @@ import json
 import logging
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Dict, List, Optional, Tuple
@@ -103,6 +105,28 @@ def atomic_copy(src: Path, dst: Path) -> None:
         tmp.unlink()
     shutil.copy2(src, tmp)
     tmp.replace(dst)
+
+
+def atomic_write_json(path: Path, obj: dict) -> None:
+    atomic_write_text(path, json.dumps(obj, indent=2) + "\n")
+
+
+def _write_progress_B(
+    preds_root: Path,
+    shard_id: str,
+    stage: str,
+    n_sequences: int,
+    started_at: str,
+) -> None:
+    atomic_write_json(preds_root / f"progress_shard_{shard_id}.json", {
+        "shard_id": shard_id,
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "stage": stage,
+        "n_sequences": n_sequences,
+        "started_at": started_at,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    })
 
 
 def getenv_int(name: str, default: int) -> int:
@@ -619,6 +643,9 @@ def process_one_shard(
         except Exception:
             pass
 
+    started_at = datetime.now().isoformat(timespec="seconds")
+    _bprog = dict(preds_root=preds_root, shard_id=shard_id, started_at=started_at, n_sequences=0)
+
     workdir = safe_mkdir(local_base / f"stageB_shard_{shard_id}")
     emb_dir = safe_mkdir(workdir / "embeddings")
 
@@ -630,13 +657,17 @@ def process_one_shard(
     t_copy0 = perf_counter()
     shutil.copy2(graph_src, graph_local)
     timings["stage_graph_s"] = perf_counter() - t_copy0
+    _write_progress_B(stage="copy", **_bprog)
 
     t_seq0 = perf_counter()
     records = load_sequences_for_shard(shard_dir)
     if not records:
         raise RuntimeError(f"{shard_dir}: no sequences loaded (manifest empty?)")
     timings["load_sequences_s"] = perf_counter() - t_seq0
+    _bprog["n_sequences"] = len(records)
+    _write_progress_B(stage="load_seqs", **_bprog)
 
+    _write_progress_B(stage="esm", **_bprog)
     t_esm0 = perf_counter()
     part_h5s, esm_crit_s, label_to_shard = run_sharded_embeddings_subprocess(
         embeddings_dir=emb_dir,
@@ -650,6 +681,7 @@ def process_one_shard(
     timings["esm_crit_s"] = float(esm_crit_s)
     timings["esm_total_s"] = perf_counter() - t_esm0
 
+    _write_progress_B(stage="inject", **_bprog)
     t_inj0 = perf_counter()
     missing_labels, oob = inject_embeddings_from_parts(graph_local, part_h5s, label_to_shard)
     timings["inject_s"] = perf_counter() - t_inj0
@@ -658,6 +690,7 @@ def process_one_shard(
     if oob:
         log.warning(f"[{shard_id}] injection: oob_residue_indices={oob}")
 
+    _write_progress_B(stage="infer", **_bprog)
     t_inf0 = perf_counter()
     pred_local = workdir / "pred.h5"
     predict(
@@ -672,6 +705,7 @@ def process_one_shard(
     )
     timings["infer_s"] = perf_counter() - t_inf0
 
+    _write_progress_B(stage="publish", **_bprog)
     t_pub0 = perf_counter()
     atomic_copy(pred_local, pred_pub)
     atomic_write_text(done_pub, "ok\n")
@@ -692,9 +726,10 @@ def process_one_shard(
         "missing_labels": int(missing_labels),
         "oob_residue_indices": int(oob),
         "timings": timings,
-        "generated_at": __import__("datetime").datetime.now().isoformat(),
+        "generated_at": datetime.now().isoformat(),
     }
     atomic_write_text(meta_pub, json.dumps(meta, indent=2) + "\n")
+    _write_progress_B(stage="done", **_bprog)
 
     try:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -868,7 +903,7 @@ def main() -> int:
     n_fail = sum(1 for r in results if r.status == "failed")
 
     summary = {
-        "generated_at": __import__("datetime").datetime.now().isoformat(),
+        "generated_at": datetime.now().isoformat(),
         "run_root": str(run_root),
         "job_id": job_id,
         "array_task_id": task_id,

@@ -6,9 +6,11 @@ import gzip
 import json
 import os
 import shutil
+import socket
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from dataclasses import dataclass, asdict
+from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Dict, List, Optional, Tuple
@@ -50,6 +52,31 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 def atomic_write_json(path: Path, obj: dict) -> None:
     atomic_write_text(path, json.dumps(obj, indent=2) + "\n")
+
+def _write_progress(
+    shard_dir: Path,
+    shard_id: str,
+    stage: str,
+    n_inputs: int,
+    n_models: int,
+    prep_done: int,
+    prep_ok: int,
+    prep_fail: int,
+    started_at: str,
+) -> None:
+    atomic_write_json(shard_dir / "progress.json", {
+        "shard_id": shard_id,
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "stage": stage,
+        "n_inputs": n_inputs,
+        "n_models": n_models,
+        "prep_done": prep_done,
+        "prep_ok": prep_ok,
+        "prep_fail": prep_fail,
+        "started_at": started_at,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    })
 
 def gz_write_tsv(path: Path, header: str, rows: List[str]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -346,6 +373,10 @@ def run_stageA_one_shard(
         meta = json.loads((shard_dir / "meta_stageA.json").read_text())
         return StageAResult(**meta["result"])
 
+    started_at = datetime.now().isoformat(timespec="seconds")
+    _prog = dict(shard_dir=shard_dir, shard_id=shard_id, started_at=started_at,
+                 n_inputs=0, n_models=0, prep_done=0, prep_ok=0, prep_fail=0)
+
     local_root = Path(tempfile.mkdtemp(prefix=f"drab_stageA_{shard_id}_", dir=str(tmp_base) if tmp_base else None))
     pdbs_dir = safe_mkdir(local_root / "pdbs")
     merged_dir = safe_mkdir(local_root / "merged")
@@ -356,6 +387,7 @@ def run_stageA_one_shard(
     inputs = [Path(x.strip()) for x in shard_list.read_text().splitlines() if x.strip()]
     if not inputs:
         raise SystemExit(f"{shard_list}: empty")
+    _prog["n_inputs"] = len(inputs)
 
     # Stage PDBs to local (parallel I/O for network filesystems)
     def _copy_pdb(src: Path) -> Path:
@@ -366,6 +398,7 @@ def run_stageA_one_shard(
     max_copy_workers = min(16, len(inputs)) if inputs else 1
     with ThreadPoolExecutor(max_workers=max_copy_workers) as ex:
         list(ex.map(_copy_pdb, inputs))
+    _write_progress(stage="copy", **_prog)
 
     staged = sorted(pdbs_dir.glob("*.pdb"))
 
@@ -373,6 +406,8 @@ def run_stageA_one_shard(
     expanded: List[Path] = []
     for p in staged:
         expanded.extend(split_models_if_ensemble(p, local_root / "models" / p.stem))
+    _prog["n_models"] = len(expanded)
+    _write_progress(stage="expand", **_prog)
 
     # PREP: build merged 2-chain PDBs + HL fasta (for annotate), and manifest for ESM later
     # Parallelized across cores for better throughput
@@ -397,10 +432,13 @@ def run_stageA_one_shard(
                 ok += 1
             else:
                 fail += 1
+            _prog.update(prep_done=ok + fail, prep_ok=ok, prep_fail=fail)
+            _write_progress(stage="prep", **_prog)
 
     prep_s = perf_counter() - t1
 
     # Annotate (CPU)
+    _write_progress(stage="annotate", **_prog)
     t2 = perf_counter()
     annotate_folder_one_by_one_mp(
         merged_dir,
@@ -415,15 +453,17 @@ def run_stageA_one_shard(
     correct_region_json(region_json)
 
     # Graphs (CPU)
+    _write_progress(stage="graphs", **_prog)
     t3 = perf_counter()
     graphs_local = local_root / "graphs.h5"
     gen_graphs(merged_dir, graphs_local, region_json, num_cores, antigen_chainid_for_graph, tmp_base)
     ensure_zero_embedding(graphs_local)
     graphs_s = perf_counter() - t3
 
-    # Cluster (CPU) — keep it here so GPU stage is truly “GPU-only”
+    # Cluster (CPU) — keep it here so GPU stage is truly "GPU-only"
     cluster_s = 0.0
     if do_cluster:
+        _write_progress(stage="cluster", **_prog)
         t4 = perf_counter()
         cluster_mcl(graphs_local)
         cluster_s = perf_counter() - t4
@@ -469,6 +509,7 @@ def run_stageA_one_shard(
     })
 
     atomic_write_text(done, "ok\n")
+    _write_progress(stage="done", **_prog)
     shutil.rmtree(local_root, ignore_errors=True)
     return res
 
