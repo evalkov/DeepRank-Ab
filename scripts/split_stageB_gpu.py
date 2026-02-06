@@ -734,7 +734,7 @@ def main() -> int:
 
     ap.add_argument("--shards-dir", default="", help="Override shards root (default: <run-root>/shards)")
     ap.add_argument("--preds-dir", default="", help="Override preds root (default: <run-root>/preds)")
-    ap.add_argument("--logs-dir", default="", help="Override logs root (default: <run-root>/logs_stageB)")
+    ap.add_argument("--logs-dir", default="", help="Override logs root (default: <run-root>/logs)")
     ap.add_argument("--local-base", default="", help="Override local temp base (default: $SLURM_TMPDIR or $TMPDIR or /tmp/<user>)")
 
     args = ap.parse_args()
@@ -765,7 +765,7 @@ def main() -> int:
 
     shards_root = Path(args.shards_dir).resolve() if args.shards_dir else (run_root / "shards")
     preds_root = Path(args.preds_dir).resolve() if args.preds_dir else (run_root / "preds")
-    logs_root = Path(args.logs_dir).resolve() if args.logs_dir else (run_root / "logs_stageB")
+    logs_root = Path(args.logs_dir).resolve() if args.logs_dir else (run_root / "logs")
     safe_mkdir(preds_root)
     safe_mkdir(logs_root)
 

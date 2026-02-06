@@ -43,8 +43,9 @@ Three-stage pipeline for large-scale antibody-antigen binding affinity predictio
   preds/                     |          summary.py    timeseries.py
                              |               |            |
                              v               v            v
-                      summary_*_ALL     *_summary    *_timeseries
-                       .tsv / .json       .pdf          .pdf
+                       compute_       *_summary    *_timeseries
+                       metrics          .pdf          .pdf
+                       .tsv/.json
 
   MONITORING (user-facing, run in parallel)
   ------------------------------------------
@@ -108,8 +109,8 @@ RUN_ROOT/
 ├── logs/                     # SLURM job logs (.log / .err)
 ├── compute_metrics_summary.pdf
 ├── compute_metrics_timeseries.pdf
-├── summary_*_ALL.tsv
-├── summary_*_ALL.json
+├── compute_metrics.tsv
+├── compute_metrics.json
 └── pipeline_jobs.json        # Job IDs from run_pipeline.py
 ```
 
@@ -167,8 +168,8 @@ Merges per-shard predictions and runs metrics analysis.
 | `summary/stats.json` | Summary statistics (count, mean, median, percentiles, quality bins) |
 | `compute_metrics_summary.pdf` | Single-page bar-chart of resource usage across tasks |
 | `compute_metrics_timeseries.pdf` | Multi-page time-series of CPU/GPU/memory/IO |
-| `summary_*_ALL.tsv` | Aggregate metrics table |
-| `summary_*_ALL.json` | Aggregate metrics (JSON) |
+| `compute_metrics.tsv` | Aggregate metrics table |
+| `compute_metrics.json` | Aggregate metrics (JSON) |
 
 ### Quality Bins
 

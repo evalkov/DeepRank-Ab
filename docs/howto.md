@@ -220,8 +220,8 @@ run_root/
 ├── logs/                     # SLURM job logs
 ├── compute_metrics_summary.pdf
 ├── compute_metrics_timeseries.pdf
-├── summary_*_ALL.tsv
-├── summary_*_ALL.json
+├── compute_metrics.tsv
+├── compute_metrics.json
 └── pipeline_config.yaml      # Copy of config used
 ```
 

@@ -226,10 +226,16 @@ if [[ -d "${METRICS_DIR}" ]]; then
       echo "[StageC] WARNING: time-series plot failed (non-fatal)"
     fi
 
-    # Copy aggregate tables to run root for convenience
-    for f in "${METRICS_DIR}"/summary_*_ALL.{tsv,json}; do
-      [[ -f "${f}" ]] && cp "${f}" "${RUN_ROOT}/" && echo "[StageC] ✓ Copied $(basename "${f}") -> ${RUN_ROOT}/"
-    done
+    # Copy aggregate tables to run root with clean names
+    AGG_JSON=$(ls -1t "${METRICS_DIR}"/summary_*_ALL.json 2>/dev/null | head -1 || true)
+    if [[ -n "${AGG_TSV}" ]]; then
+      cp "${AGG_TSV}" "${RUN_ROOT}/compute_metrics.tsv"
+      echo "[StageC] ✓ compute_metrics.tsv"
+    fi
+    if [[ -n "${AGG_JSON}" ]]; then
+      cp "${AGG_JSON}" "${RUN_ROOT}/compute_metrics.json"
+      echo "[StageC] ✓ compute_metrics.json"
+    fi
   else
     echo "[StageC] WARNING: metrics summarization failed (non-fatal)"
   fi
