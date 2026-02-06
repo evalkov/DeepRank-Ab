@@ -215,16 +215,37 @@ def print_table(run_root: Path, shards: List[dict], max_rows: int = 0) -> None:
     n_pending = sum(1 for s in shards if s["status"] == "pending")
 
     total_models = sum(s["n_models"] for s in shards)
-    total_prepped = sum(s["prep_ok"] + s["prep_fail"] for s in shards)
-    total_ok = sum(s["prep_ok"] for s in shards)
-    total_fail = sum(s["prep_fail"] for s in shards)
 
     print(f"Shards: {n_done} done, {n_running} running, {n_pending} pending  ({n_total} total)")
 
     if total_models > 0:
-        pct = total_prepped / total_models * 100
-        fail_str = f"  {total_fail} fail" if total_fail else ""
-        print(f"PDBs:   {total_prepped}/{total_models} prepped ({pct:.1f}%)   {total_ok} ok{fail_str}")
+        # Stages complete once a shard moves past them
+        _past_prep = {"annotate", "graphs", "cluster", "done"}
+        _past_anno = {"graphs", "cluster", "done"}
+        _past_graph = {"cluster", "done"}
+        _past_clust = {"done"}
+
+        prepped = sum(s["prep_ok"] for s in shards if s["stage"] in _past_prep)
+        annotated = sum(s["prep_ok"] for s in shards if s["stage"] in _past_anno)
+        graphed = sum(s["prep_ok"] for s in shards if s["stage"] in _past_graph)
+        clustered = sum(s["prep_ok"] for s in shards if s["stage"] in _past_clust)
+
+        # Include partial progress for in-flight stages
+        prepping = sum(s["prep_ok"] for s in shards if s["stage"] == "prep")
+        graphing = sum(s["graphs_done"] for s in shards if s["stage"] == "graphs")
+
+        def _fmt(done: int, partial: int, total: int) -> str:
+            if partial:
+                return f"{done}+{partial}/{total}"
+            return f"{done}/{total}"
+
+        fail = sum(s["prep_fail"] for s in shards)
+        fail_str = f"  ({fail} fail)" if fail else ""
+
+        print(f"PDBs:   Prepped {_fmt(prepped, prepping, total_models)}   "
+              f"Annotated {annotated}   "
+              f"Graphed {_fmt(graphed, graphing, total_models)}   "
+              f"Clustered {clustered}{fail_str}")
     else:
         total_inputs = sum(s["n_inputs"] for s in shards)
         print(f"PDBs:   {total_inputs} inputs across shards (models not yet expanded)")
