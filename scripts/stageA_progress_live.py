@@ -90,6 +90,7 @@ def collect_shards(run_root: Path) -> List[dict]:
                 "shard_id": sid,
                 "status": "done",
                 "jobid": prog.get("jobid", ""),
+                "pid": prog.get("pid", ""),
                 "hostname": prog.get("hostname", "-"),
                 "stage": "done",
                 "n_inputs": prog.get("n_inputs", n_list_pdbs),
@@ -107,6 +108,7 @@ def collect_shards(run_root: Path) -> List[dict]:
                 "shard_id": sid,
                 "status": "running",
                 "jobid": prog.get("jobid", ""),
+                "pid": prog.get("pid", ""),
                 "hostname": prog.get("hostname", "-"),
                 "stage": prog.get("stage", "?"),
                 "n_inputs": prog.get("n_inputs", n_list_pdbs),
@@ -124,6 +126,7 @@ def collect_shards(run_root: Path) -> List[dict]:
                 "shard_id": sid,
                 "status": "pending",
                 "jobid": "",
+                "pid": "",
                 "hostname": "-",
                 "stage": "pending",
                 "n_inputs": n_list_pdbs,
@@ -196,7 +199,7 @@ def print_table(run_root: Path, shards: List[dict], max_rows: int = 0) -> None:
     print("-" * len(hdr))
 
     for s in visible:
-        jobid = s.get("jobid") or "-"
+        jobid = s.get("jobid") or str(s.get("pid") or "-")
         host = _short_host(str(s["hostname"])) if s["hostname"] != "-" else "-"
         prep = format_prep(s)
         print(f"{s['shard_id']:<8}{jobid:<14}{host:<18}{s['stage']:<12}{prep:<18}{s['elapsed']:<10}")

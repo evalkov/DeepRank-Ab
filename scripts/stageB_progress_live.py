@@ -81,7 +81,7 @@ def collect_shards(run_root: Path) -> List[dict]:
             results.append({
                 "shard_id": sid,
                 "status": "waiting_A",
-                "jobid": "",
+                "jobid": "", "pid": "",
                 "hostname": "-",
                 "stage": "waiting_A",
                 "n_sequences": 0,
@@ -93,6 +93,7 @@ def collect_shards(run_root: Path) -> List[dict]:
                 "shard_id": sid,
                 "status": "failed",
                 "jobid": prog.get("jobid", "") if prog else "",
+                "pid": prog.get("pid", "") if prog else "",
                 "hostname": prog.get("hostname", "-") if prog else "-",
                 "stage": "FAILED",
                 "n_sequences": prog.get("n_sequences", 0) if prog else 0,
@@ -104,6 +105,7 @@ def collect_shards(run_root: Path) -> List[dict]:
                 "shard_id": sid,
                 "status": "done",
                 "jobid": prog.get("jobid", "") if prog else "",
+                "pid": prog.get("pid", "") if prog else "",
                 "hostname": prog.get("hostname", "-") if prog else "-",
                 "stage": "done",
                 "n_sequences": prog.get("n_sequences", 0) if prog else 0,
@@ -115,6 +117,7 @@ def collect_shards(run_root: Path) -> List[dict]:
                 "shard_id": sid,
                 "status": "running",
                 "jobid": prog.get("jobid", ""),
+                "pid": prog.get("pid", ""),
                 "hostname": prog.get("hostname", "-"),
                 "stage": prog.get("stage", "?"),
                 "n_sequences": prog.get("n_sequences", 0),
@@ -125,7 +128,7 @@ def collect_shards(run_root: Path) -> List[dict]:
             results.append({
                 "shard_id": sid,
                 "status": "pending",
-                "jobid": "",
+                "jobid": "", "pid": "",
                 "hostname": "-",
                 "stage": "pending",
                 "n_sequences": 0,
@@ -171,7 +174,7 @@ def print_table(run_root: Path, shards: List[dict], preds_dir: Path,
     print("-" * len(hdr))
 
     for s in visible:
-        jobid = s.get("jobid") or "-"
+        jobid = s.get("jobid") or str(s.get("pid") or "-")
         host = _short_host(str(s["hostname"])) if s["hostname"] != "-" else "-"
         seqs = str(s["n_sequences"]) if s["n_sequences"] > 0 else "-"
         print(f"{s['shard_id']:<8}{jobid:<14}{host:<18}{s['stage']:<12}{seqs:<10}{s['elapsed']:<10}")
