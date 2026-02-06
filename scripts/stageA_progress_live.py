@@ -161,21 +161,50 @@ def format_prep(s: dict) -> str:
     return f"{done}/{n_models}"
 
 
-def print_table(run_root: Path, shards: List[dict]) -> None:
+def _select_visible(shards: List[dict], max_rows: int) -> tuple:
+    """Pick the most interesting shards to display, up to max_rows.
+
+    Priority: failed/running first, then done, then pending.
+    Visible rows keep their original shard-ID order.
+    Returns (visible_list, hidden_list).
+    """
+    if max_rows <= 0 or len(shards) <= max_rows:
+        return shards, []
+
+    _PRIO = {"failed": 0, "running": 0, "done": 1, "pending": 2, "waiting_A": 2}
+    indexed = [(i, _PRIO.get(s["status"], 2), s) for i, s in enumerate(shards)]
+    indexed.sort(key=lambda x: (x[1], x[0]))
+
+    chosen = {x[0] for x in indexed[:max_rows]}
+    visible = [s for i, s in enumerate(shards) if i in chosen]
+    hidden = [s for i, s in enumerate(shards) if i not in chosen]
+    return visible, hidden
+
+
+def print_table(run_root: Path, shards: List[dict], max_rows: int = 0) -> None:
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"StageA progress   {now}   RUN_ROOT: {run_root}")
     print()
+
+    visible, hidden = _select_visible(shards, max_rows)
 
     # Header
     hdr = f"{'Shard':<8}{'PID':<8}{'Host':<18}{'Stage':<12}{'Progress':<18}{'Elapsed':<10}"
     print(hdr)
     print("-" * len(hdr))
 
-    for s in shards:
+    for s in visible:
         pid = str(s["pid"]) if s["pid"] != "-" else "-"
         host = _short_host(str(s["hostname"])) if s["hostname"] != "-" else "-"
         prep = format_prep(s)
         print(f"{s['shard_id']:<8}{pid:<8}{host:<18}{s['stage']:<12}{prep:<18}{s['elapsed']:<10}")
+
+    if hidden:
+        counts: Dict[str, int] = {}
+        for s in hidden:
+            counts[s["status"]] = counts.get(s["status"], 0) + 1
+        parts = [f"{v} {k}" for k, v in sorted(counts.items(), key=lambda x: -x[1])]
+        print(f"{'':8}... {len(hidden)} more not shown ({', '.join(parts)})")
 
     print()
 
@@ -206,6 +235,8 @@ def main() -> int:
     ap.add_argument("--run-root", required=True, help="Run root directory (BeeGFS)")
     ap.add_argument("--watch", type=int, default=0, metavar="N",
                     help="Auto-refresh every N seconds (0 = print once)")
+    ap.add_argument("--max-rows", type=int, default=20, metavar="N",
+                    help="Max shard rows to display (0 = unlimited, default 20)")
     args = ap.parse_args()
 
     run_root = Path(args.run_root).resolve()
@@ -218,13 +249,13 @@ def main() -> int:
             while True:
                 os.system("clear" if os.name != "nt" else "cls")
                 shards = collect_shards(run_root)
-                print_table(run_root, shards)
+                print_table(run_root, shards, max_rows=args.max_rows)
                 time.sleep(args.watch)
         except KeyboardInterrupt:
             print()
     else:
         shards = collect_shards(run_root)
-        print_table(run_root, shards)
+        print_table(run_root, shards, max_rows=args.max_rows)
 
     return 0
 
