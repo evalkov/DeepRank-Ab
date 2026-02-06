@@ -308,6 +308,12 @@ if [[ "${SLURM_ARRAY_TASK_ID}" == "0" ]]; then
   fi
 
   flock -u 9
+
+  # If launched as sharding-only job, exit now
+  if [[ "${MAKE_SHARDS_ONLY:-0}" == "1" ]]; then
+    echo "[StageA] MAKE_SHARDS_ONLY=1; sharding complete, exiting."
+    exit 0
+  fi
 else
   # Wait for shard lists to be created by task 0
   for _ in $(seq 1 900); do
