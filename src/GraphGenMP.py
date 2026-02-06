@@ -290,6 +290,10 @@ class GraphHDF5(object):
             'ref': ref,
         }
         
+        # Write initial graph progress so the live viewer can show 0/total immediately
+        if graph_progress_file:
+            _write_graph_progress(graph_progress_file, 0, len(pdbs))
+
         # Result queue with bounded size to prevent memory overflow
         # Adjust maxsize based on available memory (50-100 is reasonable)
         result_queue = Queue(maxsize=100)
@@ -349,6 +353,10 @@ class GraphHDF5(object):
         total_count = len(pdbs)
         processed = 0
         last_progress_write = 0.0
+
+        # Write initial graph progress so the live viewer can show 0/total immediately
+        if graph_progress_file:
+            _write_graph_progress(graph_progress_file, 0, total_count)
 
         if use_tqdm:
             desc = "{:25s}".format("   create HDF5")

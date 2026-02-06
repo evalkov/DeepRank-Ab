@@ -148,11 +148,13 @@ def format_prep(s: dict) -> str:
         return "-"
     done = s["prep_done"]
     # Show graph-building progress when in "graphs" stage
-    if s["stage"] == "graphs" and s.get("graphs_total", 0) > 0:
-        gd = s["graphs_done"]
-        gt = s["graphs_total"]
-        pct = gd / gt * 100
-        return f"{gd}/{gt} ({pct:.0f}%)"
+    if s["stage"] == "graphs":
+        gt = s.get("graphs_total", 0)
+        if gt > 0:
+            gd = s["graphs_done"]
+            pct = gd / gt * 100
+            return f"{gd}/{gt} ({pct:.0f}%)"
+        return "starting..."
     if s["status"] == "done" or s["stage"] not in ("copy", "expand", "prep"):
         fail_str = f"  {s['prep_fail']} fail" if s["prep_fail"] else ""
         return f"{s['prep_ok']}/{n_models} ok{fail_str}"
@@ -165,7 +167,7 @@ def print_table(run_root: Path, shards: List[dict]) -> None:
     print()
 
     # Header
-    hdr = f"{'Shard':<8}{'PID':<8}{'Host':<18}{'Stage':<12}{'Prep':<18}{'Elapsed':<10}"
+    hdr = f"{'Shard':<8}{'PID':<8}{'Host':<18}{'Stage':<12}{'Progress':<18}{'Elapsed':<10}"
     print(hdr)
     print("-" * len(hdr))
 
