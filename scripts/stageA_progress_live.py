@@ -239,8 +239,12 @@ def print_table(run_root: Path, shards: List[dict], max_rows: int = 0) -> None:
         fail_str = f"  ({fail} fail)" if fail else ""
 
         print(f"Prepped: {prepped}  Annotated: {annotated}  "
-              f"Graphed: {graphed}  Clustered: {clustered}  "
-              f"(of {total_models}){fail_str}")
+              f"Graphed: {graphed}  Clustered: {clustered}{fail_str}")
+
+        total_inputs = sum(s["n_inputs"] for s in shards)
+        done_inputs = sum(s["n_inputs"] for s in shards if s["status"] == "done")
+        pct = done_inputs / total_inputs * 100 if total_inputs else 0
+        print(f"PDBs processed: {done_inputs}/{total_inputs} ({pct:.1f}%)")
     else:
         total_inputs = sum(s["n_inputs"] for s in shards)
         print(f"PDBs:   {total_inputs} inputs across shards (models not yet expanded)")
