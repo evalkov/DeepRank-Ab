@@ -9,14 +9,15 @@ Stage B (GPU): process shards produced by Stage A CPU using batch ESM.
 When processing multiple shards (--start-index/--count), sequences from all
 pending shards are merged and ESM embeddings are computed in a single pass
 across all GPUs. This reduces ESM model loads from S*G to G (for S shards
-on G GPUs). Per-shard inject + infer + publish then runs sequentially,
-preserving per-shard DONE sentinels for spot instance resilience.
+on G GPUs). Per-shard inject + infer + publish then runs via a GPU worker
+pool so post-ESM work scales across devices while preserving per-shard DONE
+sentinels for spot instance resilience.
 
 Three-phase flow:
   Phase 0: Filter targets — skip shards already DONE or missing STAGEA_DONE
   Phase 1: Collect sequences from all pending shards (deduplicate by label)
   Phase 2: Batch ESM — one call to run_sharded_embeddings_subprocess()
-  Phase 3: Per-shard inject + infer + publish with DONE checkpoint per shard
+  Phase 3: Per-shard inject + infer + publish in parallel worker pool
 
 Spot instance resilience:
   - Preempted during Phase 2: all ESM work lost, but ran only once not per-shard
@@ -45,7 +46,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import h5py
 import torch
@@ -578,26 +579,22 @@ def run_sharded_embeddings_subprocess(
 # ----------------------------
 # Embedding injection
 # ----------------------------
-def inject_embeddings_from_parts(graph_h5: Path, part_h5s: List[Path], label_to_shard: Dict[str, int]) -> Tuple[int, int]:
-    """
-    Inject ESM embeddings into graph HDF5.
-
-    Optimized version: pre-loads all embeddings into memory at startup for
-    vectorized access, avoiding repeated HDF5 lookups per residue.
-    """
-    import numpy as np
-
-    # Pre-load all embeddings into a single dict (label -> numpy array)
-    # This avoids repeated HDF5 lookups and enables vectorized injection
-    all_embeddings: Dict[str, np.ndarray] = {}
-
+def load_embedding_cache(part_h5s: List[Path]) -> Dict[str, Any]:
+    """Load scalar embeddings from part HDF5 files once for reuse across shards."""
+    out: Dict[str, Any] = {}
     for part_h5 in part_h5s:
         with h5py.File(part_h5, "r") as h:
             if "scalar" not in h:
                 continue
-            scalar_group = h["scalar"]
-            for label in scalar_group.keys():
-                all_embeddings[label] = scalar_group[label][()]
+            g = h["scalar"]
+            for label in g.keys():
+                out[label] = g[label][()]
+    return out
+
+
+def inject_embeddings_from_cache(graph_h5: Path, all_embeddings: Dict[str, Any]) -> Tuple[int, int]:
+    """Inject preloaded embeddings into one graph HDF5."""
+    import numpy as np
 
     missing_labels = 0
     oob = 0
@@ -608,36 +605,29 @@ def inject_embeddings_from_parts(graph_h5: Path, part_h5s: List[Path], label_to_
             n_residues = len(residues)
             emb = np.zeros((n_residues, 1), dtype=np.float32)
 
-            # Decode chain and resid arrays once (vectorized where possible)
-            chains = []
-            resids = []
-            for res in residues:
+            chain_to_indices: Dict[str, List[int]] = {}
+            chain_to_resids: Dict[str, List[int]] = {}
+            for i, res in enumerate(residues):
                 chain = res[0].decode() if isinstance(res[0], (bytes, bytearray)) else str(res[0])
                 resid = int(res[1].decode()) if isinstance(res[1], (bytes, bytearray)) else int(res[1])
-                chains.append(chain)
-                resids.append(resid)
+                chain_to_indices.setdefault(chain, []).append(i)
+                chain_to_resids.setdefault(chain, []).append(resid)
 
-            # Group residues by chain for batch lookup
-            chain_to_indices: Dict[str, List[Tuple[int, int]]] = {}
-            for i, (chain, resid) in enumerate(zip(chains, resids)):
-                chain_to_indices.setdefault(chain, []).append((i, resid))
-
-            # Inject embeddings per chain (vectorized)
-            for chain, idx_resid_list in chain_to_indices.items():
+            for chain, idx_list in chain_to_indices.items():
                 label = f"{mol}.{chain}"
                 if label not in all_embeddings:
-                    missing_labels += len(idx_resid_list)
+                    missing_labels += len(idx_list)
                     continue
 
                 arr = all_embeddings[label]
-                arr_len = len(arr)
-
-                for i, resid in idx_resid_list:
-                    j = resid - 1
-                    if 0 <= j < arr_len:
-                        emb[i, 0] = float(arr[j])
-                    else:
-                        oob += 1
+                arr_len = int(len(arr))
+                idx = np.asarray(idx_list, dtype=np.int64)
+                resids = np.asarray(chain_to_resids[chain], dtype=np.int64)
+                j = resids - 1
+                valid = (j >= 0) & (j < arr_len)
+                if np.any(valid):
+                    emb[idx[valid], 0] = arr[j[valid]].astype(np.float32, copy=False)
+                oob += int((~valid).sum())
 
             grp = f[mol].require_group("node_data")
             if "embedding" in grp:
@@ -647,31 +637,64 @@ def inject_embeddings_from_parts(graph_h5: Path, part_h5s: List[Path], label_to_
     return missing_labels, oob
 
 
+def inject_embeddings_from_parts(graph_h5: Path, part_h5s: List[Path], label_to_shard: Dict[str, int]) -> Tuple[int, int]:
+    """Backwards-compatible helper: load part files then inject."""
+    _ = label_to_shard  # no longer needed once embeddings are preloaded by label
+    all_embeddings = load_embedding_cache(part_h5s)
+    return inject_embeddings_from_cache(graph_h5, all_embeddings)
+
+
 # ----------------------------
 # DeepRank-Ab inference
 # ----------------------------
-def predict(graph_h5: Path, model_path: Path, out_pred_h5: Path, device: str, dl_workers: int, batch_size: int, num_cores: int, prefetch_factor: int = 4) -> None:
-    if dl_workers < 0:
-        dl_workers = 0
-    if dl_workers > num_cores:
-        dl_workers = num_cores
+class PredictorRunner:
+    """Reusable inference runner that keeps the model loaded in-process."""
 
-    net = NeuralNet(
-        database=str(graph_h5),
-        Net=egnn,
-        node_feature=NODE_FEATURES,
-        edge_feature=EDGE_FEATURES,
-        target=None,
-        task="reg",
+    def __init__(
+        self,
+        bootstrap_graph_h5: Path,
+        model_path: Path,
+        device: str,
+        dl_workers: int,
+        batch_size: int,
+        num_cores: int,
+        prefetch_factor: int = 4,
+    ) -> None:
+        if dl_workers < 0:
+            dl_workers = 0
+        if dl_workers > num_cores:
+            dl_workers = num_cores
+        self.net = NeuralNet(
+            database=str(bootstrap_graph_h5),
+            Net=egnn,
+            node_feature=NODE_FEATURES,
+            edge_feature=EDGE_FEATURES,
+            target=None,
+            task="reg",
+            batch_size=batch_size,
+            num_workers=dl_workers,
+            prefetch_factor=prefetch_factor,
+            device_name=device,
+            shuffle=False,
+            pretrained_model=str(model_path),
+            cluster_nodes="mcl",
+        )
+
+    def predict(self, graph_h5: Path, out_pred_h5: Path) -> None:
+        self.net.predict(database_test=str(graph_h5), hdf5=str(out_pred_h5))
+
+
+def predict(graph_h5: Path, model_path: Path, out_pred_h5: Path, device: str, dl_workers: int, batch_size: int, num_cores: int, prefetch_factor: int = 4) -> None:
+    runner = PredictorRunner(
+        bootstrap_graph_h5=graph_h5,
+        model_path=model_path,
+        device=device,
+        dl_workers=dl_workers,
         batch_size=batch_size,
-        num_workers=dl_workers,
+        num_cores=num_cores,
         prefetch_factor=prefetch_factor,
-        device_name=device,
-        shuffle=False,
-        pretrained_model=str(model_path),
-        cluster_nodes="mcl",
     )
-    net.predict(database_test=str(graph_h5), hdf5=str(out_pred_h5))
+    runner.predict(graph_h5=graph_h5, out_pred_h5=out_pred_h5)
 
 
 # ----------------------------
@@ -834,6 +857,9 @@ def process_shard_post_esm(
     local_base: Path,
     started_at: str,
     n_sequences: int,
+    embedding_cache: Optional[Dict[str, Any]] = None,
+    predictor: Optional[PredictorRunner] = None,
+    worker_id: Optional[int] = None,
 ) -> ShardResult:
     """Per-shard post-ESM work: copy graph -> inject embeddings -> infer -> publish."""
     t0 = perf_counter()
@@ -865,9 +891,15 @@ def process_shard_post_esm(
     timings["stage_graph_s"] = perf_counter() - t_copy0
     _write_progress_B(stage="inject", **_bprog)
 
-    # Inject embeddings from consolidated part_h5s
+    if embedding_cache is None:
+        t_cache0 = perf_counter()
+        embedding_cache = load_embedding_cache(part_h5s)
+        timings["embedding_cache_load_s"] = perf_counter() - t_cache0
+
+    # Inject embeddings from consolidated embedding cache
     t_inj0 = perf_counter()
-    missing_labels, oob = inject_embeddings_from_parts(graph_local, part_h5s, label_to_shard)
+    _ = label_to_shard
+    missing_labels, oob = inject_embeddings_from_cache(graph_local, embedding_cache)
     timings["inject_s"] = perf_counter() - t_inj0
     if missing_labels:
         log.warning(f"[{shard_id}] injection: missing_labels={missing_labels}")
@@ -878,16 +910,21 @@ def process_shard_post_esm(
     _write_progress_B(stage="infer", **_bprog)
     t_inf0 = perf_counter()
     pred_local = workdir / "pred.h5"
-    predict(
-        graph_h5=graph_local,
-        model_path=model_path,
-        out_pred_h5=pred_local,
-        device=device,
-        dl_workers=dl_workers,
-        batch_size=batch_size,
-        num_cores=num_cores,
-        prefetch_factor=prefetch_factor,
-    )
+    if pred_local.exists():
+        pred_local.unlink()
+    if predictor is None:
+        predict(
+            graph_h5=graph_local,
+            model_path=model_path,
+            out_pred_h5=pred_local,
+            device=device,
+            dl_workers=dl_workers,
+            batch_size=batch_size,
+            num_cores=num_cores,
+            prefetch_factor=prefetch_factor,
+        )
+    else:
+        predictor.predict(graph_h5=graph_local, out_pred_h5=pred_local)
     timings["infer_s"] = perf_counter() - t_inf0
 
     # Publish
@@ -907,6 +944,7 @@ def process_shard_post_esm(
         "device": device,
         "esm_model": ESM_MODEL,
         "esm_batch_mode": True,
+        "worker_id": worker_id,
         "missing_labels": int(missing_labels),
         "oob_residue_indices": int(oob),
         "timings": timings,
@@ -923,6 +961,283 @@ def process_shard_post_esm(
     return ShardResult(shard_id=shard_id, status="ok", wall_s=perf_counter() - t0, timings=timings)
 
 
+def write_failed_sentinel(preds_root: Path, shard_id: str, message: str) -> None:
+    """Write FAILED sentinel for one shard and ensure DONE sentinel is absent."""
+    _pred_pub, done_pub, failed_pub, _meta_pub = stageB_paths(preds_root, shard_id)
+    try:
+        atomic_write_text(failed_pub, message)
+    except Exception:
+        pass
+    if done_pub.exists():
+        try:
+            done_pub.unlink()
+        except Exception:
+            pass
+
+
+def assign_shards_balanced(shard_ids: List[str], shard_weights: Dict[str, int], n_workers: int) -> List[List[str]]:
+    """Greedy load balancing by sequence count."""
+    if n_workers <= 0:
+        return [list(shard_ids)]
+    buckets: List[List[str]] = [[] for _ in range(n_workers)]
+    loads = [0 for _ in range(n_workers)]
+    items = sorted(shard_ids, key=lambda sid: int(shard_weights.get(sid, 0)), reverse=True)
+    for sid in items:
+        i = min(range(n_workers), key=lambda j: loads[j])
+        buckets[i].append(sid)
+        loads[i] += int(shard_weights.get(sid, 0))
+    return buckets
+
+
+def _result_from_dict(d: Dict[str, Any]) -> ShardResult:
+    return ShardResult(
+        shard_id=str(d.get("shard_id", "")),
+        status=str(d.get("status", "failed")),
+        wall_s=float(d.get("wall_s", 0.0)),
+        timings=dict(d.get("timings", {})),
+        notes=list(d.get("notes", [])),
+        error=d.get("error"),
+    )
+
+
+def run_post_esm_worker_mode(args: argparse.Namespace) -> int:
+    """Internal mode: one worker process handles a shard subset on one GPU."""
+    if not (args.worker_shards_json and args.part_h5s_json and args.model_path):
+        print("post-esm-worker mode requires --worker-shards-json, --part-h5s-json, --model-path", file=sys.stderr)
+        return 2
+
+    run_root = Path(args.run_root).resolve()
+    model_path = Path(args.model_path).resolve()
+    if not model_path.is_file():
+        print(f"ERROR: model not found: {model_path}", file=sys.stderr)
+        return 2
+
+    shards_root = Path(args.shards_dir).resolve() if args.shards_dir else (run_root / "shards")
+    preds_root = Path(args.preds_dir).resolve() if args.preds_dir else (run_root / "preds")
+    logs_root = Path(args.logs_dir).resolve() if args.logs_dir else (run_root / "logs")
+    safe_mkdir(preds_root)
+    safe_mkdir(logs_root)
+
+    local_base = Path(args.local_base).resolve() if args.local_base else (run_root / "tmp_post_esm_worker")
+    safe_mkdir(local_base)
+
+    shard_payload = json.loads(Path(args.worker_shards_json).read_text())
+    if isinstance(shard_payload, dict):
+        shard_ids = [str(x) for x in shard_payload.get("shard_ids", [])]
+    else:
+        shard_ids = [str(x) for x in shard_payload]
+
+    part_h5s = [Path(p) for p in json.loads(Path(args.part_h5s_json).read_text())]
+    label_to_shard: Dict[str, int] = {}
+    if args.label_to_shard_json:
+        label_to_shard = {k: int(v) for k, v in json.loads(Path(args.label_to_shard_json).read_text()).items()}
+
+    shard_seq_counts: Dict[str, int] = {}
+    if args.shard_seq_counts_json:
+        shard_seq_counts = {k: int(v) for k, v in json.loads(Path(args.shard_seq_counts_json).read_text()).items()}
+
+    started_at = args.worker_started_at or datetime.now().isoformat(timespec="seconds")
+    results: List[ShardResult] = []
+
+    if not shard_ids:
+        if args.worker_results_json:
+            atomic_write_text(Path(args.worker_results_json), json.dumps({"results": []}, indent=2) + "\n")
+        return 0
+
+    # Load embeddings once for all shards handled by this worker.
+    t_cache0 = perf_counter()
+    embedding_cache = load_embedding_cache(part_h5s)
+    cache_s = perf_counter() - t_cache0
+    log.info(f"[post-esm worker {args.worker_id}] loaded {len(embedding_cache)} embeddings in {cache_s:.1f}s")
+
+    # Warm model once and reuse for all per-shard predicts.
+    bootstrap_graph = None
+    for sid in shard_ids:
+        g = shards_root / f"shard_{sid}" / "graphs.h5"
+        if g.is_file():
+            bootstrap_graph = g
+            break
+    if bootstrap_graph is None:
+        for sid in shard_ids:
+            msg = f"FAILED shard {sid}: missing graphs.h5 (bootstrap graph not found)\n"
+            write_failed_sentinel(preds_root, sid, msg)
+            results.append(ShardResult(shard_id=sid, status="failed", wall_s=0.0, error="missing graphs.h5"))
+    else:
+        predictor = PredictorRunner(
+            bootstrap_graph_h5=bootstrap_graph,
+            model_path=model_path,
+            device=args.device,
+            dl_workers=int(args.dl_workers),
+            batch_size=int(args.batch_size),
+            num_cores=int(args.num_cores),
+            prefetch_factor=int(args.prefetch_factor),
+        )
+
+        for sid in shard_ids:
+            n_seq = int(shard_seq_counts.get(sid, 0))
+            try:
+                r = process_shard_post_esm(
+                    run_root=run_root,
+                    shards_root=shards_root,
+                    preds_root=preds_root,
+                    shard_id=sid,
+                    part_h5s=part_h5s,
+                    label_to_shard=label_to_shard,
+                    model_path=model_path,
+                    device=args.device,
+                    num_cores=int(args.num_cores),
+                    dl_workers=int(args.dl_workers),
+                    batch_size=int(args.batch_size),
+                    prefetch_factor=int(args.prefetch_factor),
+                    local_base=local_base,
+                    started_at=started_at,
+                    n_sequences=n_seq,
+                    embedding_cache=embedding_cache,
+                    predictor=predictor,
+                    worker_id=int(args.worker_id),
+                )
+                results.append(r)
+                log.info(f"[post-esm worker {args.worker_id}] [{sid}] status={r.status} wall={r.wall_s:.1f}s")
+            except Exception as e:
+                tb = traceback.format_exc()
+                msg = f"FAILED shard {sid}: {e}\n\n{tb}\n"
+                write_failed_sentinel(preds_root, sid, msg)
+                results.append(
+                    ShardResult(
+                        shard_id=sid,
+                        status="failed",
+                        wall_s=0.0,
+                        error=str(e),
+                        notes=["see_FAILED_sentinel", f"worker_id={args.worker_id}"],
+                    )
+                )
+                log.error(f"[post-esm worker {args.worker_id}] [{sid}] FAILED: {e}")
+
+    if args.worker_results_json:
+        payload = {"worker_id": int(args.worker_id), "results": [dc.asdict(r) for r in results]}
+        atomic_write_text(Path(args.worker_results_json), json.dumps(payload, indent=2) + "\n")
+
+    n_fail = sum(1 for r in results if r.status == "failed")
+    return 0 if n_fail == 0 else 1
+
+
+def run_post_esm_parallel(
+    run_root: Path,
+    shards_root: Path,
+    preds_root: Path,
+    logs_root: Path,
+    local_base: Path,
+    pending_sids: List[str],
+    shard_seq_counts: Dict[str, int],
+    part_h5s: List[Path],
+    label_to_shard: Dict[str, int],
+    model_path: Path,
+    device: str,
+    num_cores: int,
+    dl_workers: int,
+    batch_size: int,
+    prefetch_factor: int,
+    esm_gpus: int,
+    started_at: str,
+) -> List[ShardResult]:
+    """Run post-ESM inject+infer+publish in a GPU worker pool."""
+    if not pending_sids:
+        return []
+
+    worker_count = min(max(1, int(esm_gpus)), len(pending_sids))
+    assignments = assign_shards_balanced(pending_sids, shard_seq_counts, worker_count)
+    assignments = [a for a in assignments if a]
+    if not assignments:
+        return []
+
+    worker_count = len(assignments)
+    worker_num_cores = max(1, int(num_cores) // worker_count)
+    worker_dl_workers = 0
+    if int(dl_workers) > 0:
+        worker_dl_workers = max(1, int(dl_workers) // worker_count)
+
+    helper_dir = safe_mkdir(local_base / "post_esm_orchestrator")
+    part_h5s_json = helper_dir / "part_h5s.json"
+    label_to_shard_json = helper_dir / "label_to_shard.json"
+    shard_seq_counts_json = helper_dir / "shard_seq_counts.json"
+    atomic_write_text(part_h5s_json, json.dumps([str(p) for p in part_h5s], indent=2) + "\n")
+    atomic_write_text(label_to_shard_json, json.dumps(label_to_shard, indent=2) + "\n")
+    atomic_write_text(shard_seq_counts_json, json.dumps(shard_seq_counts, indent=2) + "\n")
+
+    launches: List[Tuple[int, List[str], Path, subprocess.Popen]] = []
+    for worker_id, shard_ids in enumerate(assignments):
+        shard_json = helper_dir / f"worker_{worker_id}.shards.json"
+        results_json = helper_dir / f"worker_{worker_id}.results.json"
+        atomic_write_text(shard_json, json.dumps({"shard_ids": shard_ids}, indent=2) + "\n")
+
+        worker_local = local_base / f"post_esm_worker_{worker_id}"
+        env = os.environ.copy()
+        # One worker per visible GPU slot.
+        env["CUDA_VISIBLE_DEVICES"] = str(worker_id % max(1, int(esm_gpus)))
+
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--post-esm-worker",
+            "--run-root", str(run_root),
+            "--model-path", str(model_path),
+            "--device", str(device),
+            "--num-cores", str(worker_num_cores),
+            "--dl-workers", str(worker_dl_workers),
+            "--batch-size", str(int(batch_size)),
+            "--prefetch-factor", str(int(prefetch_factor)),
+            "--shards-dir", str(shards_root),
+            "--preds-dir", str(preds_root),
+            "--logs-dir", str(logs_root),
+            "--local-base", str(worker_local),
+            "--worker-id", str(worker_id),
+            "--worker-shards-json", str(shard_json),
+            "--part-h5s-json", str(part_h5s_json),
+            "--label-to-shard-json", str(label_to_shard_json),
+            "--shard-seq-counts-json", str(shard_seq_counts_json),
+            "--worker-results-json", str(results_json),
+            "--worker-started-at", str(started_at),
+        ]
+        proc = subprocess.Popen(cmd, env=env)
+        launches.append((worker_id, shard_ids, results_json, proc))
+        log.info(
+            f"[post-esm] worker {worker_id}: gpu_slot={worker_id % max(1, int(esm_gpus))} "
+            f"shards={len(shard_ids)} seqs={sum(int(shard_seq_counts.get(s, 0)) for s in shard_ids)}"
+        )
+
+    for worker_id, shard_ids, _results_json, proc in launches:
+        rc = proc.wait()
+        if rc != 0:
+            log.error(f"[post-esm] worker {worker_id} exited rc={rc} (assigned shards={shard_ids})")
+
+    all_results: List[ShardResult] = []
+    seen: set = set()
+    for worker_id, shard_ids, results_json, _proc in launches:
+        if not results_json.is_file():
+            log.error(f"[post-esm] missing worker results file: {results_json}")
+            continue
+        try:
+            payload = json.loads(results_json.read_text())
+        except Exception as e:
+            log.error(f"[post-esm] failed to parse {results_json}: {e}")
+            continue
+        for rd in payload.get("results", []):
+            r = _result_from_dict(rd)
+            all_results.append(r)
+            seen.add(r.shard_id)
+
+    # Guardrail: if a worker crashed before emitting result entries, mark shards failed.
+    for sid in pending_sids:
+        if sid in seen:
+            continue
+        msg = f"FAILED shard {sid}: missing worker result entry\n"
+        write_failed_sentinel(preds_root, sid, msg)
+        all_results.append(ShardResult(shard_id=sid, status="failed", wall_s=0.0, error="missing worker result entry"))
+
+    all_results.sort(key=lambda r: r.shard_id)
+    return all_results
+
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -930,10 +1245,18 @@ def main() -> int:
     ap = argparse.ArgumentParser()
 
     ap.add_argument("--esm-worker", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--post-esm-worker", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--shard-tsv", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--out-h5", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--report-json", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--done-sentinel", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--worker-id", type=int, default=0, help=argparse.SUPPRESS)
+    ap.add_argument("--worker-shards-json", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--part-h5s-json", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--label-to-shard-json", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--shard-seq-counts-json", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--worker-results-json", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--worker-started-at", default="", help=argparse.SUPPRESS)
 
     ap.add_argument("--esm-toks-per-batch", type=int, default=DEFAULT_TOKS_PER_BATCH)
     ap.add_argument("--esm-scalar-dtype", default=os.environ.get("ESM_SCALAR_DTYPE", "float16"))
@@ -972,6 +1295,9 @@ def main() -> int:
             scalar_dtype=str(args.esm_scalar_dtype),
         )
         return 0
+
+    if args.post_esm_worker:
+        return run_post_esm_worker_mode(args)
 
     run_root = Path(args.run_root).resolve()
     if not args.model_path:
@@ -1033,6 +1359,7 @@ def main() -> int:
 
     t_all0 = perf_counter()
     results: List[ShardResult] = []
+    post_esm_workers_used = 0
 
     # ------------------------------------------------------------------
     # PHASE 0: Filter targets — skip shards already DONE or missing STAGEA_DONE
@@ -1108,48 +1435,31 @@ def main() -> int:
             # ------------------------------------------------------------------
             # PHASE 3: Per-shard inject + infer + publish
             # ------------------------------------------------------------------
-            log.info("--- Phase 3: per-shard inject + infer + publish ---")
+            log.info("--- Phase 3: per-shard inject + infer + publish (parallel) ---")
             _write_progress_B_batch(stage="per_shard", **_batch_prog)
-
-            for sid in pending_sids:
-                n_seq = seq_batch.shard_to_count.get(sid, 0)
-                log.info(f"=== SHARD {sid} ({n_seq} seqs) ===")
-                _write_progress_B_batch(stage="per_shard", current_shard=sid, **_batch_prog)
-                try:
-                    r = process_shard_post_esm(
-                        run_root=run_root,
-                        shards_root=shards_root,
-                        preds_root=preds_root,
-                        shard_id=sid,
-                        part_h5s=part_h5s,
-                        label_to_shard=label_to_shard,
-                        model_path=model_path,
-                        device=args.device,
-                        num_cores=int(args.num_cores),
-                        dl_workers=int(args.dl_workers),
-                        batch_size=int(args.batch_size),
-                        prefetch_factor=int(args.prefetch_factor),
-                        local_base=local_base,
-                        started_at=started_at,
-                        n_sequences=n_seq,
-                    )
-                    results.append(r)
-                    log.info(f"[{sid}] status={r.status} wall={r.wall_s:.1f}s")
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    _pred_pub, done_pub, failed_pub, _meta_pub = stageB_paths(preds_root, sid)
-                    msg = f"FAILED shard {sid}: {e}\n\n{tb}\n"
-                    try:
-                        atomic_write_text(failed_pub, msg)
-                    except Exception:
-                        pass
-                    if done_pub.exists():
-                        try:
-                            done_pub.unlink()
-                        except Exception:
-                            pass
-                    results.append(ShardResult(shard_id=sid, status="failed", wall_s=0.0, error=str(e), notes=["see_FAILED_sentinel"]))
-                    log.error(f"[{sid}] FAILED: {e}")
+            post_esm_workers_used = min(max(1, int(esm_gpus)), len(pending_sids))
+            post_results = run_post_esm_parallel(
+                run_root=run_root,
+                shards_root=shards_root,
+                preds_root=preds_root,
+                logs_root=logs_root,
+                local_base=local_base,
+                pending_sids=pending_sids,
+                shard_seq_counts={k: int(v) for k, v in seq_batch.shard_to_count.items()},
+                part_h5s=part_h5s,
+                label_to_shard=label_to_shard,
+                model_path=model_path,
+                device=args.device,
+                num_cores=int(args.num_cores),
+                dl_workers=int(args.dl_workers),
+                batch_size=int(args.batch_size),
+                prefetch_factor=int(args.prefetch_factor),
+                esm_gpus=esm_gpus,
+                started_at=started_at,
+            )
+            results.extend(post_results)
+            for r in post_results:
+                log.info(f"[{r.shard_id}] status={r.status} wall={r.wall_s:.1f}s")
 
             _write_progress_B_batch(stage="done", **_batch_prog)
 
@@ -1173,6 +1483,7 @@ def main() -> int:
         "num_cores": int(args.num_cores),
         "dl_workers": int(args.dl_workers),
         "batch_size": int(args.batch_size),
+        "post_esm_workers_used": int(post_esm_workers_used),
         "targets": targets,
         "n_targets": len(targets),
         "n_ok": n_ok,
@@ -1196,4 +1507,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
