@@ -258,7 +258,6 @@ def build_env(cfg: PipelineConfig, stage: str, **overrides) -> Dict[str, str]:
         env["MIN_PER_SHARD"] = str(sa.get("min_per_shard", 10))
         env["MAX_PER_SHARD"] = str(sa.get("max_per_shard", 100))
         env["GLOB_PAT"] = sa.get("glob", "**/*.pdb")
-        env["VORO_OMP_THREADS"] = str(sa.get("voro_omp_threads", 1))
         env["STAGEA_SPLIT_MODE"] = "1" if sa.get("split_mode", False) else "0"
         env["STAGEA_STRICT_AFFINITY"] = str(sa.get("strict_affinity", 0))
         env["STAGEA_USE_SRUN_BIND"] = str(sa.get("use_srun_bind", 1))

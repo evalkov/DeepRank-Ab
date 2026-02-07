@@ -218,6 +218,13 @@ class AtomGraph(Graph):
             cutoff=self.contact_distance)
         
         all_nodes = self._get_all_valid_nodes(self.atom_contact_pairs)
+        # Cache coordinates once per atom node to avoid per-edge DB lookups.
+        node_xyz = {}
+        for node in all_nodes:
+            row = db.get("x,y,z", chainID=node[0], resSeq=node[1], serial=node[-2])
+            if row:
+                node_xyz[node] = np.array(row[0], dtype=float)
+        self._node_xyz = node_xyz
         
         # interface edges (u,v) and (v,u)
         for key, neighbors in self.atom_contact_pairs.items():
@@ -226,7 +233,7 @@ class AtomGraph(Graph):
             for v in neighbors:
                 if v not in all_nodes:
                     continue
-                d = self._get_edge_distance(key, v, db)
+                d = self._get_edge_distance(key, v, db, coord_cache=node_xyz)
                 self.nx.add_edge(key, v, dist=d, type=bytes("interface", encoding="utf-8"))
                 self.nx.add_edge(v, key, dist=d, type=bytes("interface", encoding="utf-8"))
         
@@ -261,7 +268,10 @@ class AtomGraph(Graph):
             resSeq = int(node_key[1])
 
             self.nx.nodes[node_key]["chain"] = {"A": 0, "B": 1}[chainID]
-            self.nx.nodes[node_key]["pos"] = db.get("x,y,z", chainID=chainID, resSeq=resSeq, serial=atomid)[0]
+            pos = self._node_xyz.get(node_key)
+            if pos is None:
+                pos = np.array(db.get("x,y,z", chainID=chainID, resSeq=resSeq, serial=atomid)[0], dtype=float)
+            self.nx.nodes[node_key]["pos"] = pos
 
 
             self.nx.nodes[node_key]["res_type"] = self.onehot(
@@ -422,11 +432,14 @@ class AtomGraph(Graph):
 
     
 
-    def _get_edge_distance(self, node1, node2, db):
+    def _get_edge_distance(self, node1, node2, db, coord_cache=None):
         """
         Minimal atom-atom distance between two residues.
         """
-        #        # (chain1, resSeq1, resName1, atomID1, atomName1)
+        # node format: (chain, resSeq, resName, atomID, atomName)
+        if coord_cache is not None and node1 in coord_cache and node2 in coord_cache:
+            return float(np.linalg.norm(coord_cache[node1] - coord_cache[node2]))
+
         xyz1 = np.array(db.get("x,y,z", chainID=node1[0], resSeq=node1[1], serial=node1[-2]))
         xyz2 = np.array(db.get("x,y,z", chainID=node2[0], resSeq=node2[1], serial=node2[-2]))
         d2 = (

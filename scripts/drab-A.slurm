@@ -34,20 +34,6 @@ STAGEA_STRICT_AFFINITY="${STAGEA_STRICT_AFFINITY:-0}"  # 1 -> fail if effective 
 STAGEA_USE_SRUN_BIND="${STAGEA_USE_SRUN_BIND:-1}"      # 1 -> launch payload with srun --cpu-bind
 STAGEA_SRUN_CPU_BIND="${STAGEA_SRUN_CPU_BIND:-cores}"  # passed to srun --cpu-bind
 
-# Voronota parallelization settings:
-# - VORO_OMP_THREADS: OpenMP threads per voronota subprocess (default: 1)
-#   For voronota 1.29 compiled with -qopenmp, increase for intra-voronota parallelism.
-#   Trade-off: NUM_CORES × VORO_OMP_THREADS should not exceed total cores.
-#   Examples: NUM_CORES=32, VORO_OMP_THREADS=1 -> 32 threads (default)
-#             NUM_CORES=16, VORO_OMP_THREADS=2 -> 32 threads
-#             NUM_CORES=8,  VORO_OMP_THREADS=4 -> 32 threads
-export VORO_OMP_THREADS="${VORO_OMP_THREADS:-1}"
-export VORO_PROCESSORS=1
-export VORO_CHAIN_PARALLEL=0
-export OMP_NUM_THREADS=1
-export OMP_PROC_BIND=close
-export OMP_PLACES=cores
-
 export TMPDIR="${SLURM_TMPDIR:-/tmp}"
 echo "=== Storage check ==="
 echo "TMPDIR=${TMPDIR:-not set}"
@@ -61,11 +47,9 @@ echo "STAGEA_PHASE=${STAGEA_PHASE}"
 echo "NUM_CORES=${NUM_CORES}"
 echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-unset}"
 echo "SLURM_CPU_BIND=${SLURM_CPU_BIND:-unset}"
-echo "OMP_NUM_THREADS=${OMP_NUM_THREADS:-unset}"
 echo "MKL_NUM_THREADS=${MKL_NUM_THREADS:-unset}"
 echo "OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-unset}"
 echo "NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-unset}"
-echo "VORO_OMP_THREADS=${VORO_OMP_THREADS:-unset}"
 echo "===================="
 
 _detect_affinity_cpus() {
@@ -158,6 +142,7 @@ PY
 }
 
 start_monitor() {
+  local target_pid="${1:-}"
   if [[ "${COLLECT_COMPUTE_METRICS}" != "1" ]]; then
     echo "[metrics] disabled (COLLECT_COMPUTE_METRICS=${COLLECT_COMPUTE_METRICS})"
     return 0
@@ -178,6 +163,11 @@ start_monitor() {
                "--prefix" "${PREFIX}"
                "--percore"
                "--net" )
+
+  # Process-scoped metrics for the launched payload (best effort).
+  if [[ -n "${target_pid}" ]] && [[ "${target_pid}" =~ ^[0-9]+$ ]] && (( target_pid > 0 )); then
+    args+=( "--pid" "${target_pid}" )
+  fi
 
   # Only pass --gpus if we have any
   if [[ -n "${gpu_list}" ]]; then
@@ -204,9 +194,6 @@ cleanup_monitor() {
 }
 
 trap cleanup_monitor EXIT
-if [[ "${MAKE_SHARDS_ONLY:-0}" != "1" ]]; then
-  start_monitor
-fi
 
 # ============================================================
 # VORONOTA / BSA BACKEND
@@ -373,8 +360,17 @@ esac
 if [[ "${STAGEA_USE_SRUN_BIND}" == "1" ]] && command -v srun >/dev/null 2>&1; then
   echo "[StageA] launching with srun --cpu-bind=${STAGEA_SRUN_CPU_BIND}"
   srun --ntasks=1 --cpus-per-task="${NUM_CORES}" --cpu-bind="${STAGEA_SRUN_CPU_BIND}" \
-    python3 "${SCRIPT}" "${PY_ARGS[@]}"
+    python3 "${SCRIPT}" "${PY_ARGS[@]}" &
+  PAYLOAD_PID=$!
 else
   echo "[StageA] launching directly (srun binding disabled/unavailable)"
-  python3 "${SCRIPT}" "${PY_ARGS[@]}"
+  python3 "${SCRIPT}" "${PY_ARGS[@]}" &
+  PAYLOAD_PID=$!
 fi
+
+if [[ "${MAKE_SHARDS_ONLY:-0}" != "1" ]]; then
+  start_monitor "${PAYLOAD_PID}"
+fi
+
+wait "${PAYLOAD_PID}"
+exit $?

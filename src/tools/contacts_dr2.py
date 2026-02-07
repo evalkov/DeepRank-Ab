@@ -205,29 +205,51 @@ def add_residue_contacts_atomgraph(graph, db):
     # force field
     ff = AtomicForcefield(FF_DIR)
 
-    # collect per-atom data for each residue node
+    # collect per-atom data once per unique residue and map atom nodes to indices
     all_atoms: List[Atom] = []
-    # Build lookup dict for O(1) access instead of O(N) linear search per edge
     atom_to_idx: dict = {}
+    residue_cache: dict = {}
 
     for node in graph.nx.nodes:
         chainID, resSeq, resName, atomid, atomname = node
-        raw = db.get("name,x,y,z", chainID=chainID, resSeq=int(resSeq))
+        res_seq_int = int(resSeq)
+        residue_key = (chainID, res_seq_int, resName)
+        if residue_key not in residue_cache:
+            raw = db.get("serial,name,x,y,z", chainID=chainID, resSeq=res_seq_int)
+            atom_names = []
+            by_serial = {}
+            by_name = {}
+            for serial, name, x, y, z in raw:
+                atom_name = name.decode() if isinstance(name, (bytes, bytearray)) else str(name)
+                serial_i = int(serial)
+                pos = np.array([x, y, z], dtype=float)
+                atom_names.append(atom_name)
+                by_serial[serial_i] = (atom_name, pos)
+                by_name[atom_name] = (serial_i, pos)
+            residue_cache[residue_key] = (atom_names, by_serial, by_name)
 
-        # decode atom names once per residue for charge/LJ lookup
-        atom_names = [
-            r[0].decode() if isinstance(r[0], (bytes, bytearray)) else r[0]
-            for r in raw
-        ]
+        atom_names, by_serial, by_name = residue_cache[residue_key]
+        node_atom_name = atomname.decode() if isinstance(atomname, (bytes, bytearray)) else str(atomname)
+        serial_i = int(atomid)
+        atom_entry = by_serial.get(serial_i)
+        if atom_entry is None:
+            fallback = by_name.get(node_atom_name)
+            if fallback is None:
+                continue
+            atom_name, pos = node_atom_name, fallback[1]
+        else:
+            atom_name, pos = atom_entry
 
-        for name, x, y, z in raw:
-            # minimal atom record
-            atom_name = name.decode() if isinstance(name, (bytes, bytearray)) else name
-            pos = np.array([x, y, z], dtype=float)
-            idx = len(all_atoms)
-            all_atoms.append(Atom(chainID, resName, resSeq, atom_name, atom_names, pos))
-            # Key: (chain, resName, resSeq, atomName) for O(1) lookup
-            atom_to_idx[(chainID, resName, resSeq, atom_name)] = idx
+        node_key = (chainID, resName, resSeq, atom_name)
+        if node_key in atom_to_idx:
+            continue
+
+        idx = len(all_atoms)
+        all_atoms.append(Atom(chainID, resName, resSeq, atom_name, atom_names, pos))
+        atom_to_idx[node_key] = idx
+
+    if not all_atoms:
+        return
 
     # nonbonded matrices once for all atoms
     D, E_elec, E_vdw = compute_nonbonded(all_atoms, ff)
@@ -236,8 +258,10 @@ def add_residue_contacts_atomgraph(graph, db):
     for u, v in graph.nx.edges:
         # node format: (chainID, resSeq, resName, atomID, atomName)
         # lookup key:  (chain, resName, resSeq, atomName)
-        key1 = (u[0], u[2], u[1], u[4])
-        key2 = (v[0], v[2], v[1], v[4])
+        u_atom = u[4].decode() if isinstance(u[4], (bytes, bytearray)) else str(u[4])
+        v_atom = v[4].decode() if isinstance(v[4], (bytes, bytearray)) else str(v[4])
+        key1 = (u[0], u[2], u[1], u_atom)
+        key2 = (v[0], v[2], v[1], v_atom)
 
         idx1 = atom_to_idx.get(key1)
         idx2 = atom_to_idx.get(key2)
@@ -254,5 +278,4 @@ def add_residue_contacts_atomgraph(graph, db):
         graph.nx.edges[u, v]["elec"] = e_sum
         graph.nx.edges[u, v]["vdw"] = v_sum
         graph.nx.edges[u, v]["covalent"] = cov
-
 

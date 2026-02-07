@@ -5,6 +5,7 @@ import h5py
 from tqdm import tqdm
 import multiprocessing as mp
 from multiprocessing import Queue, Process
+from concurrent.futures import ThreadPoolExecutor
 import pickle
 import warnings
 import json
@@ -18,6 +19,7 @@ sys.path.append(os.path.dirname(__file__))
 
 # Global worker configuration (set once per worker process)
 _WORKER_CONFIG = None
+_WORKER_RESULT_QUEUE = None
 
 def _env_int(name, default):
     """Read int env var with safe fallback."""
@@ -46,13 +48,15 @@ def _env_flag(name, default=False):
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _worker_init(config):
+def _worker_init(config, result_queue=None):
     """
     Initialize worker process with configuration.
     Called once per worker at startup.
     """
     global _WORKER_CONFIG
+    global _WORKER_RESULT_QUEUE
     _WORKER_CONFIG = config
+    _WORKER_RESULT_QUEUE = result_queue
 
 
 def _worker_process_graph(pdb_path):
@@ -61,6 +65,7 @@ def _worker_process_graph(pdb_path):
     Uses global config set by _worker_init.
     """
     global _WORKER_CONFIG
+    global _WORKER_RESULT_QUEUE
     cfg = _WORKER_CONFIG
     
     try:
@@ -89,12 +94,50 @@ def _worker_process_graph(pdb_path):
         # Optionally compute score against reference
         if cfg['ref'] is not None:
             g.get_score(cfg['ref'])
-        
+
+        # Fast path: emit directly to writer queue from worker.
+        if _WORKER_RESULT_QUEUE is not None:
+            _WORKER_RESULT_QUEUE.put(g)
+            return 1
         return g
     
     except Exception as e:
-        # Return error tuple instead of raising
-        return ('ERROR', pdb_path, str(e))
+        # Emit error tuple so writer can account for failures.
+        err = ('ERROR', pdb_path, str(e))
+        if _WORKER_RESULT_QUEUE is not None:
+            _WORKER_RESULT_QUEUE.put(err)
+            return 1
+        return err
+
+
+def _build_region_map_entry(task):
+    """
+    Build (model_name, resnum, region_tag) entries for one PDB.
+    """
+    pdbfile, model_name, annot, antigen_chainid = task
+    parser = PDBParser(QUIET=True)
+    entries = []
+    try:
+        struct = parser.get_structure(model_name, pdbfile)
+        non_antigen_chain = None
+        for chain in struct[0]:
+            if chain.get_id() != antigen_chainid:
+                non_antigen_chain = chain
+                break
+        if non_antigen_chain is None:
+            return entries
+
+        pdb_nums = [r.get_id()[1] for r in non_antigen_chain.get_residues()]
+        num_annot = len(annot)
+        for i, resnum in enumerate(pdb_nums):
+            if i < num_annot:
+                _, tag = annot[i]
+            else:
+                tag = "UNK"
+            entries.append((model_name, resnum, tag))
+    except Exception:
+        return []
+    return entries
 
 
 def _write_graph_progress(progress_file, done, total):
@@ -253,24 +296,26 @@ class GraphHDF5(object):
             with open(region_json) as f:
                 raw = json.load(f)
             
-            parser = PDBParser(QUIET=True)
+            tasks = []
             for pdbfile in pdbs:
                 model_name = os.path.basename(pdbfile).replace('.pdb', '')
-                if model_name not in raw:
+                annot = raw.get(model_name)
+                if annot is None:
                     continue
-                
-                annot = raw[model_name]
-                struct = parser.get_structure(model_name, pdbfile)
-                chainA = struct[0][next(c.get_id() for c in struct[0] if c.get_id() != antigen_chainid)]
-                pdb_nums = [r.get_id()[1] for r in chainA.get_residues()]
-                num_annot = len(annot)
-                
-                for i, resnum in enumerate(pdb_nums):
-                    if i < num_annot:
-                        _, tag = annot[i]
-                    else:
-                        tag = "UNK"
-                    self.region_map[(model_name, resnum)] = tag
+                tasks.append((pdbfile, model_name, annot, antigen_chainid))
+
+            if tasks:
+                # Build region map in parallel to avoid serial pre-pass bottleneck.
+                n_region_workers = min(max(1, nproc), len(tasks), 8)
+                if n_region_workers <= 1:
+                    for chunk in map(_build_region_map_entry, tasks):
+                        for model_name, resnum, tag in chunk:
+                            self.region_map[(model_name, resnum)] = tag
+                else:
+                    with ThreadPoolExecutor(max_workers=n_region_workers) as ex:
+                        for chunk in ex.map(_build_region_map_entry, tasks):
+                            for model_name, resnum, tag in chunk:
+                                self.region_map[(model_name, resnum)] = tag
         
         # feature flags
         self.add_orientation = add_orientation
@@ -358,24 +403,22 @@ class GraphHDF5(object):
         pool = mp.Pool(
             processes=nproc,
             initializer=_worker_init,
-            initargs=(worker_config,)
+            initargs=(worker_config, result_queue)
         )
         
-        enqueued = 0
-        t_enqueue_start = _time.monotonic()
-        last_enqueue_log = t_enqueue_start
+        completed = 0
+        t_start = _time.monotonic()
+        last_log = t_start
 
-        # Process graphs and feed results to queue
-        # imap_unordered for better load balancing (results arrive as completed)
+        # Process graphs; workers push results directly into writer queue.
         try:
-            for result in pool.imap_unordered(_worker_process_graph, pdbs, chunksize=1):
-                result_queue.put(result)
-                enqueued += 1
-                if telemetry and (_time.monotonic() - last_enqueue_log) >= writer_log_every_s:
-                    elapsed = max(_time.monotonic() - t_enqueue_start, 1e-9)
-                    rate = enqueued / elapsed
-                    print(f"[graph-pipeline] enqueued={enqueued}/{len(pdbs)} rate={rate:.2f}/s")
-                    last_enqueue_log = _time.monotonic()
+            for _ in pool.imap_unordered(_worker_process_graph, pdbs, chunksize=1):
+                completed += 1
+                if telemetry and (_time.monotonic() - last_log) >= writer_log_every_s:
+                    elapsed = max(_time.monotonic() - t_start, 1e-9)
+                    rate = completed / elapsed
+                    print(f"[graph-pipeline] completed={completed}/{len(pdbs)} rate={rate:.2f}/s")
+                    last_log = _time.monotonic()
         except KeyboardInterrupt:
             print("\nInterrupted by user")
             pool.terminate()

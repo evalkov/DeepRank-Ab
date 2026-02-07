@@ -110,6 +110,13 @@ class BSA_Freesasa(object):
         res = self.sql.get_contact_residues(cutoff=cutoff)
         keys = list(res.keys())
         res = res[keys[0]] + res[keys[1]]
+        unique_res = set(res)
+
+        # Pre-fetch residue centroids once (used for bsa_data_xyz).
+        residue_xyz = {}
+        for chain_id, resseq in unique_res:
+            coords = self.sql.get('x,y,z', resSeq=resseq, chainID=chain_id)
+            residue_xyz[(chain_id, resseq)] = np.mean(coords, 0) if coords else np.zeros(3)
 
         for r in res:
             # SAS in complex
@@ -126,8 +133,7 @@ class BSA_Freesasa(object):
             bsa = asa_unbound - asa_complex
 
             chain = {'A': 0, 'B': 1}[r[0]]
-            xyz = np.mean(self.sql.get(
-                'x,y,z', resSeq=r[1], chainID=r[0]), 0)
+            xyz = residue_xyz[(r[0], r[1])]
             xyzkey = tuple([chain] + xyz.tolist())
 
             self.bsa_data[r] = [bsa]

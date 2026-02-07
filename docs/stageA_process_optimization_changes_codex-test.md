@@ -221,3 +221,71 @@ Runtime checks in this environment were limited because required dependencies ar
 - No training/inference scientific kernels were modified.
 - No residue/contact/BSA/Voronota formulas were changed.
 - Changes focus on scheduling, execution topology, idempotency markers, and observability.
+
+---
+
+## Follow-Up Optimization Pass (2026-02-07, Later)
+
+This follow-up focused specifically on the serial bottlenecks observed in Stage A telemetry.
+Algorithms and scientific outputs were preserved.
+
+### 1) `src/GraphGenMP.py` (IPC and prepass bottlenecks)
+
+- Removed the extra worker -> parent -> writer relay for graph objects.
+  - Workers now push graph results directly to the writer queue.
+  - Parent process tracks lightweight completion tokens only.
+- Parallelized the region-map prepass (previously serial) with a bounded thread pool.
+
+Expected effect:
+- Less parent-process serialization overhead.
+- Better overlap between worker compute and writer throughput.
+- Lower startup overhead before graph workers fully engage.
+
+### 2) `src/AtomGraph.py` (repeated DB lookup bottlenecks)
+
+- Added per-node coordinate caching in `get_graph()`.
+- Reused cached coordinates for interface edge distance calculations.
+- Reused cached coordinates for node `pos` assignment in `get_node_features()`.
+
+Expected effect:
+- Fewer repeated `db.get(...)` calls in hot loops.
+- Lower Python/db overhead during edge and node feature construction.
+
+### 3) `src/tools/contacts_dr2.py` (atomgraph contact expansion bottleneck)
+
+- Refactored `add_residue_contacts_atomgraph()` to cache residue atom data once.
+- Removed repeated full-residue expansion for every atom node.
+- Built atom-node lookup indices once per unique atom.
+
+Expected effect:
+- Reduced redundant data expansion and lookup work prior to nonbonded matrix build.
+- Lower memory/CPU overhead in edge feature computation.
+
+### 4) `src/tools/BSA.py` (repeated centroid query bottleneck)
+
+- Prefetched contact-residue centroids once per unique residue in `get_contact_residue_sasa()`.
+
+Expected effect:
+- Reduced repeated SQL coordinate fetches in BSA bookkeeping.
+
+### 5) `src/tools/annotate.py` (small-shard ANARCI overhead)
+
+- Raised ANARCI parallel-batch activation threshold:
+  - now requires at least `max(64, ANARCI_PARALLEL_BATCHES * 32)` records.
+
+Expected effect:
+- Avoid process/chunk overhead dominating small shards.
+
+### 6) `scripts/drab-A.slurm` + `scripts/run_pipeline.py` (thread knob cleanup + telemetry)
+
+- Removed Stage A wiring for `VORO_OMP_THREADS` in launch/config path.
+- Removed Stage A-specific OMP/VORO runtime knob logging in `drab-A.slurm`.
+- Added process-scoped metrics attachment (best effort):
+  - Stage A payload is launched in background.
+  - monitor is started with `--pid <payload_pid>` where available.
+  - enables `proc_metrics_*` output when the PID path is valid.
+
+### 7) Documentation updates
+
+- Updated `scripts/pipeline.yaml.example` to remove `voro_omp_threads`.
+- Updated `docs/howto.md` tuning guidance to emphasize shard/process tuning.

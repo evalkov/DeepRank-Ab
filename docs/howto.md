@@ -76,9 +76,6 @@ stage_a:
   max_per_shard: 100        # Maximum PDBs per shard
   glob: "**/*.pdb"          # Glob pattern to find PDBs
 
-  # Voronota settings
-  voro_omp_threads: 1             # OpenMP threads per voronota call
-
   # Runtime/process controls
   split_mode: false         # true => submit Stage A in two dependent arrays:
                             #         prep_graphs then cluster_only
@@ -262,13 +259,16 @@ stage_a:
   mem_gb: 128      # More memory per task
 ```
 
-### Voronota slow
+### Stage A graph generation slow
 
-Try enabling OpenMP (for voronota 1.29):
+Favor process/shard tuning over per-call threading:
 ```yaml
 stage_a:
-  cores: 16              # Reduce Python workers
-  voro_omp_threads: 2    # Enable voronota OpenMP
+  cores: 8               # Good per-task balance from benchmark
+  target_shard_gb: 0.1   # Avoid too-small shards
+  min_per_shard: 10
+  max_per_shard: 100
+max_concurrent_a: 32      # Scale across more shards
 ```
 
 ---
@@ -277,11 +277,11 @@ stage_a:
 
 ### Stage A (CPU)
 
-| Workload | cores | voro_omp_threads | Notes |
-|----------|-------|------------------|-------|
-| Many small PDBs | 32 | 1 | More parallelism |
-| Few large PDBs | 8 | 4 | More threads per voronota |
-| Memory constrained | 16 | 1 | Reduce workers |
+| Workload | cores | target_shard_gb | Notes |
+|----------|-------|-----------------|-------|
+| Many small PDBs | 8 | 0.08-0.10 | Better overhead amortization |
+| Few large PDBs | 8-12 | 0.10-0.20 | Fewer, heavier shards |
+| Memory constrained | 4-8 | 0.08-0.10 | Lower per-task footprint |
 
 ### Stage B (GPU)
 

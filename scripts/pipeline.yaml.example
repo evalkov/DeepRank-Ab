@@ -30,8 +30,6 @@ stage_a:
   min_per_shard: 10     # Minimum PDBs per shard
   max_per_shard: 100    # Maximum PDBs per shard
   glob: "**/*.pdb"      # Glob pattern to find PDBs
-  # Voronota settings
-  voro_omp_threads: 1             # OpenMP threads per voronota call
   # Runtime/process controls
   split_mode: false               # true => submit Stage A as two arrays: prep_graphs then cluster_only
   strict_affinity: 0              # 1 => fail task if effective cpuset < requested cores

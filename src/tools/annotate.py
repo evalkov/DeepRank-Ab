@@ -474,7 +474,8 @@ def annotate_folder_one_by_one_mp(
     # Phase 2: Batched ANARCI call(s)
     # Set ANARCI_PARALLEL_BATCHES>1 to split very large record sets across processes.
     anarci_parallel_batches = max(1, int(os.environ.get("ANARCI_PARALLEL_BATCHES", "1")))
-    if anarci_parallel_batches <= 1 or len(all_records) < 32:
+    min_records_for_parallel = max(64, anarci_parallel_batches * 32)
+    if anarci_parallel_batches <= 1 or len(all_records) < min_records_for_parallel:
         numbering, _, _ = anarci(
             all_records,
             scheme="imgt",
@@ -549,4 +550,3 @@ def annotate_folder_one_by_one_mp_single_fasta(
     out_file = out_dir / "annotations_cdrs.json"
     with open(out_file, "w") as f:
         json.dump(all_annotations, f, indent=2)
-
