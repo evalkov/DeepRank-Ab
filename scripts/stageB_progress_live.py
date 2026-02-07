@@ -149,7 +149,9 @@ def _select_visible(shards: List[dict], max_rows: int) -> tuple:
     done = [s for s in shards if s["status"] == "done"]
     pending = [s for s in shards if s["status"] in ("pending", "waiting_A")]
 
-    # Oldest running first (earliest started_at = longest elapsed)
+    # Oldest running first (earliest started_at = longest elapsed),
+    # descending shard_id as tiebreaker (matches Stage A visual order).
+    running.sort(key=lambda s: s.get("shard_id", ""), reverse=True)
     running.sort(key=lambda s: s.get("started_at") or "9")
 
     ordered = running + done + pending
