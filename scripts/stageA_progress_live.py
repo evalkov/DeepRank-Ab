@@ -143,25 +143,36 @@ def collect_shards(run_root: Path) -> List[dict]:
     return results
 
 
-def format_prep(s: dict) -> str:
+def format_progress(s: dict) -> str:
+    """Show stage-appropriate progress for each shard."""
     if s["status"] == "pending":
         return "-"
     n_models = s["n_models"]
-    if n_models == 0:
-        return "-"
-    done = s["prep_done"]
-    # Show graph-building progress when in "graphs" stage
-    if s["stage"] == "graphs":
+    stage = s["stage"]
+
+    if stage in ("copy", "expand"):
+        return "starting..." if n_models == 0 else f"{n_models} models"
+    if stage == "prep":
+        if n_models == 0:
+            return "-"
+        done = s["prep_done"]
+        pct = done / n_models * 100
+        return f"{done}/{n_models} ({pct:.0f}%)"
+    if stage == "annotate":
+        return "running..."
+    if stage == "graphs":
         gt = s.get("graphs_total", 0)
         if gt > 0:
             gd = s["graphs_done"]
             pct = gd / gt * 100
             return f"{gd}/{gt} ({pct:.0f}%)"
         return "starting..."
-    if s["status"] == "done" or s["stage"] not in ("copy", "expand", "prep"):
+    if stage == "cluster":
+        return "running..."
+    if stage == "done":
         fail_str = f"  {s['prep_fail']} fail" if s["prep_fail"] else ""
         return f"{s['prep_ok']}/{n_models} ok{fail_str}"
-    return f"{done}/{n_models}"
+    return "-"
 
 
 def _select_visible(shards: List[dict], max_rows: int) -> tuple:
@@ -201,7 +212,7 @@ def print_table(run_root: Path, shards: List[dict], max_rows: int = 0) -> None:
     for s in visible:
         jobid = s.get("jobid") or str(s.get("pid") or "-")
         host = _short_host(str(s["hostname"])) if s["hostname"] != "-" else "-"
-        prep = format_prep(s)
+        prep = format_progress(s)
         print(f"{s['shard_id']:<8}{jobid:<14}{host:<18}{s['stage']:<12}{prep:<18}{s['elapsed']:<10}")
 
     if hidden:
