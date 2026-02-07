@@ -216,6 +216,7 @@ def load_proc_metrics(path: str) -> Optional[TS]:
         "proc_cpu_pct": [safe_float(r.get("proc_cpu_pct", "")) for r in rows],
         "proc_rss_mib": [safe_float(r.get("proc_rss_mib", "")) for r in rows],
         "proc_vms_mib": [safe_float(r.get("proc_vms_mib", "")) for r in rows],
+        "proc_nprocs": [safe_float(r.get("proc_nprocs", "")) for r in rows],
     }
     return TS(t=t, series=out, t0=t0, t1=t1)
 
@@ -481,7 +482,15 @@ def make_prefix_page(prefix: str, d: str) -> Optional[plt.Figure]:
                 plot_line(ax, proc_ts.t, proc_ts.series["proc_cpu_pct"], label="cpu%")
                 rss = [v / 1024.0 for v in proc_ts.series["proc_rss_mib"]]
                 plot_line(ax, proc_ts.t, rss, label="rss GiB")
-                ax.legend(fontsize=8, loc="best")
+                if any(v == v for v in proc_ts.series.get("proc_nprocs", [])):
+                    ax2 = ax.twinx()
+                    plot_line(ax2, proc_ts.t, proc_ts.series["proc_nprocs"], label="nprocs")
+                    ax2.set_ylabel("nprocs", fontsize=9)
+                    h1, l1 = ax.get_legend_handles_labels()
+                    h2, l2 = ax2.get_legend_handles_labels()
+                    ax.legend(h1 + h2, l1 + l2, fontsize=8, loc="best")
+                else:
+                    ax.legend(fontsize=8, loc="best")
             ax.set_ylabel("mixed", fontsize=9)
 
         elif name == "gpu_util":
@@ -597,4 +606,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

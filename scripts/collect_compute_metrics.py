@@ -37,13 +37,17 @@ import shutil
 import signal
 import subprocess
 import time
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Set
 
 STOP = False
 
 
 def now_iso() -> str:
     return dt.datetime.now().isoformat(timespec="milliseconds")
+
+
+def log(msg: str) -> None:
+    print(f"[metrics] {now_iso()} {msg}", flush=True)
 
 
 def have(cmd: str) -> bool:
@@ -159,6 +163,8 @@ def main() -> None:
     ap.add_argument("--percore", action="store_true")
     ap.add_argument("--net", action="store_true")
     ap.add_argument("--pid", type=int, default=0, help="optional PID to track (RSS/CPU%%)")
+    ap.add_argument("--pid-tree", action="store_true", help="track --pid and descendants (aggregate CPU/RSS)")
+    ap.add_argument("--heartbeat-s", type=float, default=30.0, help="monitor log heartbeat interval in seconds (0=off)")
     args = ap.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -179,6 +185,12 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handler)
     signal.signal(signal.SIGINT, handler)
 
+    log(
+        "starting collector "
+        f"prefix={prefix} interval={args.interval}s percore={int(args.percore)} "
+        f"net={int(args.net)} pid={args.pid or '-'} pid_tree={int(args.pid_tree)} gpus={args.gpus}"
+    )
+
     run_snapshot(snap_txt)
     dump_env(env_txt)
 
@@ -190,6 +202,7 @@ def main() -> None:
         import psutil  # type: ignore
     except Exception:
         psutil = None
+        log("WARNING: psutil unavailable; CPU/system/process metrics disabled")
 
     gpu_header_written = False
 
@@ -208,9 +221,10 @@ def main() -> None:
     ]
     disk_fields = ["timestamp", "disk_read_MBps", "disk_write_MBps", "disk_read_iops", "disk_write_iops"]
     net_fields = ["timestamp", "net_rx_MBps", "net_tx_MBps"]
-    proc_fields = ["timestamp", "pid", "proc_cpu_pct", "proc_rss_mib", "proc_vms_mib"]
+    proc_fields = ["timestamp", "pid", "proc_nprocs", "proc_cpu_pct", "proc_rss_mib", "proc_vms_mib"]
 
     proc = None
+    primed_proc_pids: Set[int] = set()
     if psutil is not None:
         # Prime percent counters (psutil requires an initial call)
         psutil.cpu_percent(interval=None)
@@ -219,8 +233,11 @@ def main() -> None:
             try:
                 proc = psutil.Process(args.pid)
                 proc.cpu_percent(interval=None)
+                primed_proc_pids.add(proc.pid)
+                log(f"tracking process pid={proc.pid} pid_tree={int(args.pid_tree)}")
             except Exception:
                 proc = None
+                log(f"WARNING: requested pid={args.pid} is not available")
 
     prev_disk = psutil.disk_io_counters(perdisk=True) if psutil is not None else None
     prev_net = psutil.net_io_counters(pernic=False) if (psutil is not None and args.net) else None
@@ -262,12 +279,20 @@ def main() -> None:
         w_proc.writeheader()
         f_proc.flush()
 
+    heartbeat_s = max(0.0, float(args.heartbeat_s))
+    last_heartbeat_t = time.time()
+    sample_count = 0
+    last_sys_cpu = 0.0
+    last_proc_cpu = 0.0
+    last_proc_n = 0
+
     try:
         while not STOP:
             loop_t0 = time.time()
             dt_s = max(1e-6, loop_t0 - t_prev)
             t_prev = loop_t0
             ts = now_iso()
+            sample_count += 1
 
             # ----------------------------
             # GPU device poll
@@ -288,6 +313,7 @@ def main() -> None:
             # ----------------------------
             if psutil is not None:
                 cpu_total = psutil.cpu_percent(interval=None)
+                last_sys_cpu = float(cpu_total)
                 cpu_times = psutil.cpu_times_percent(interval=None)
                 iowait = float(getattr(cpu_times, "iowait", 0.0))
 
@@ -371,24 +397,66 @@ def main() -> None:
                 # Optional tracked PID
                 if w_proc is not None and f_proc is not None and proc is not None:
                     try:
-                        cpu_p = proc.cpu_percent(interval=None)
-                        mi = proc.memory_info()
+                        tracked: List[Any]
+                        if args.pid_tree:
+                            tracked = [proc]
+                            try:
+                                tracked.extend(proc.children(recursive=True))
+                            except Exception:
+                                pass
+                        else:
+                            tracked = [proc]
+
+                        cpu_p = 0.0
+                        rss_b = 0
+                        vms_b = 0
+                        alive_n = 0
+
+                        for p in tracked:
+                            try:
+                                if not p.is_running():
+                                    continue
+                                alive_n += 1
+                                if p.pid not in primed_proc_pids:
+                                    p.cpu_percent(interval=None)
+                                    primed_proc_pids.add(p.pid)
+                                cpu_p += max(0.0, float(p.cpu_percent(interval=None)))
+                                mi = p.memory_info()
+                                rss_b += int(getattr(mi, "rss", 0))
+                                vms_b += int(getattr(mi, "vms", 0))
+                            except Exception:
+                                continue
+
+                        last_proc_cpu = cpu_p
+                        last_proc_n = alive_n
                         w_proc.writerow({
                             "timestamp": ts,
                             "pid": str(proc.pid),
+                            "proc_nprocs": str(alive_n),
                             "proc_cpu_pct": f"{cpu_p:.3f}",
-                            "proc_rss_mib": f"{mi.rss/(1024**2):.3f}",
-                            "proc_vms_mib": f"{mi.vms/(1024**2):.3f}",
+                            "proc_rss_mib": f"{rss_b/(1024**2):.3f}",
+                            "proc_vms_mib": f"{vms_b/(1024**2):.3f}",
                         })
                         f_proc.flush()
                     except Exception:
                         pass
+
+            if heartbeat_s > 0.0 and (time.time() - last_heartbeat_t) >= heartbeat_s:
+                if proc is not None:
+                    log(
+                        f"samples={sample_count} sys_cpu={last_sys_cpu:.1f}% "
+                        f"proc_cpu={last_proc_cpu:.1f}% tracked_procs={last_proc_n}"
+                    )
+                else:
+                    log(f"samples={sample_count} sys_cpu={last_sys_cpu:.1f}%")
+                last_heartbeat_t = time.time()
 
             # sleep until next tick
             elapsed = time.time() - loop_t0
             time.sleep(max(0.0, args.interval - elapsed))
 
     finally:
+        log("stopping collector")
         # Ensure files are flushed/closed even on SIGTERM
         for fh in (f_sys, f_disk, f_pc, f_net, f_proc):
             if fh is None:
@@ -428,4 +496,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

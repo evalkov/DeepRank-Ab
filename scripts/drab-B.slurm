@@ -34,6 +34,7 @@ TASK_TAG="${SLURM_ARRAY_TASK_ID:-0}"
 HOST_SHORT="$(hostname -s 2>/dev/null || hostname || echo host)"
 STAGE_TAG="${STAGE_TAG:-stageB}"
 PREFIX="${STAGE_TAG}_${JOB_TAG}_${TASK_TAG}_${HOST_SHORT}"
+STAGEB_PROC_TREE_METRICS="${STAGEB_PROC_TREE_METRICS:-1}"  # 1 -> aggregate payload descendants in proc_metrics
 
 MONITOR_PID=""
 
@@ -72,6 +73,7 @@ PY
 }
 
 start_monitor() {
+  local target_pid="${1:-}"
   if [[ "${COLLECT_COMPUTE_METRICS}" != "1" ]]; then
     echo "[metrics] disabled (COLLECT_COMPUTE_METRICS=${COLLECT_COMPUTE_METRICS})"
     return 0
@@ -91,14 +93,21 @@ start_monitor() {
   echo "[metrics] Starting sampler -> ${COMPUTE_METRICS_DIR}"
   echo "[metrics]   prefix=${PREFIX} interval=${COMPUTE_METRICS_INTERVAL}s gpus=${gpu_list}"
 
-  python3 "${MONITOR_SCRIPT}" \
-    --outdir "${COMPUTE_METRICS_DIR}" \
-    --interval "${COMPUTE_METRICS_INTERVAL}" \
-    --gpus "${gpu_list}" \
-    --prefix "${PREFIX}" \
-    --percore \
-    --net \
-    > "${COMPUTE_METRICS_DIR}/${PREFIX}.monitor.log" 2>&1 &
+  local args=( "--outdir" "${COMPUTE_METRICS_DIR}"
+               "--interval" "${COMPUTE_METRICS_INTERVAL}"
+               "--gpus" "${gpu_list}"
+               "--prefix" "${PREFIX}"
+               "--percore"
+               "--net" )
+
+  if [[ -n "${target_pid}" ]] && [[ "${target_pid}" =~ ^[0-9]+$ ]] && (( target_pid > 0 )); then
+    args+=( "--pid" "${target_pid}" )
+    if [[ "${STAGEB_PROC_TREE_METRICS}" == "1" ]]; then
+      args+=( "--pid-tree" )
+    fi
+  fi
+
+  python3 "${MONITOR_SCRIPT}" "${args[@]}" > "${COMPUTE_METRICS_DIR}/${PREFIX}.monitor.log" 2>&1 &
 
   MONITOR_PID=$!
 }
@@ -118,7 +127,6 @@ cleanup_monitor() {
 }
 
 trap cleanup_monitor EXIT
-start_monitor
 
 # ============================================================
 # StageB shard selection
@@ -163,5 +171,9 @@ python3 "${SCRIPT}" \
   --device cuda \
   --num-cores "${NUM_CORES}" \
   --dl-workers "${DL_WORKERS}" \
-  --batch-size "${BATCH_SIZE}"
+  --batch-size "${BATCH_SIZE}" &
+PAYLOAD_PID=$!
 
+start_monitor "${PAYLOAD_PID}"
+wait "${PAYLOAD_PID}"
+exit $?

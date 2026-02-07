@@ -210,6 +210,7 @@ class ProcReport:
     proc_cpu: SeriesStats
     rss_mib: SeriesStats
     vms_mib: SeriesStats
+    nprocs: Optional[SeriesStats] = None
 
 
 @dataclass
@@ -466,7 +467,18 @@ def summarize_proc(proc_path: str) -> Optional[ProcReport]:
     cpu = [safe_float(r.get("proc_cpu_pct", 0)) for r in rows]
     rss = [safe_float(r.get("proc_rss_mib", 0)) for r in rows]
     vms = [safe_float(r.get("proc_vms_mib", 0)) for r in rows]
-    return ProcReport(pid=pid, proc_cpu=series_stats(cpu), rss_mib=series_stats(rss), vms_mib=series_stats(vms))
+    if any(("proc_nprocs" in r) for r in rows):
+        nprocs = [safe_float(r.get("proc_nprocs", 0)) for r in rows]
+        nprocs_stats: Optional[SeriesStats] = series_stats(nprocs)
+    else:
+        nprocs_stats = None
+    return ProcReport(
+        pid=pid,
+        proc_cpu=series_stats(cpu),
+        rss_mib=series_stats(rss),
+        vms_mib=series_stats(vms),
+        nprocs=nprocs_stats,
+    )
 
 
 def summarize_pmon(pmon_path: str, expected_gpus: int) -> Optional[List[PmonGPU]]:
@@ -602,7 +614,13 @@ def print_report(r: PrefixReport) -> None:
     if r.proc:
         p = r.proc
         print("Tracked process (optional):")
-        print(f"  pid {p.pid}: cpu mean {fmt(p.proc_cpu.mean)}% max {fmt(p.proc_cpu.max)}% | RSS max {fmt(p.rss_mib.max,1)} MiB")
+        if p.nprocs and p.nprocs.n > 0:
+            print(
+                f"  pid {p.pid}: cpu mean {fmt(p.proc_cpu.mean)}% max {fmt(p.proc_cpu.max)}% | "
+                f"RSS max {fmt(p.rss_mib.max,1)} MiB | tracked procs mean {fmt(p.nprocs.mean,1)} max {fmt(p.nprocs.max,1)}"
+            )
+        else:
+            print(f"  pid {p.pid}: cpu mean {fmt(p.proc_cpu.mean)}% max {fmt(p.proc_cpu.max)}% | RSS max {fmt(p.rss_mib.max,1)} MiB")
         print()
 
     if r.notes:
@@ -650,6 +668,17 @@ def flatten_tsv(r: PrefixReport) -> Dict[str, Any]:
         if s.net_rx_MBps and s.net_tx_MBps:
             out["net_rx_MBps_max"] = s.net_rx_MBps.max
             out["net_tx_MBps_max"] = s.net_tx_MBps.max
+
+    if r.proc:
+        p = r.proc
+        out["proc_cpu_mean"] = p.proc_cpu.mean
+        out["proc_cpu_p95"] = p.proc_cpu.p95
+        out["proc_cpu_max"] = p.proc_cpu.max
+        out["proc_rss_max_mib"] = p.rss_mib.max
+        out["proc_vms_max_mib"] = p.vms_mib.max
+        if p.nprocs:
+            out["proc_nprocs_mean"] = p.nprocs.mean
+            out["proc_nprocs_max"] = p.nprocs.max
 
     return out
 
@@ -810,4 +839,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

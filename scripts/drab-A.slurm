@@ -33,6 +33,7 @@ GLOB_PAT="${GLOB_PAT:-**/*.pdb}"
 STAGEA_STRICT_AFFINITY="${STAGEA_STRICT_AFFINITY:-0}"  # 1 -> fail if effective cpuset < NUM_CORES
 STAGEA_USE_SRUN_BIND="${STAGEA_USE_SRUN_BIND:-1}"      # 1 -> launch payload with srun --cpu-bind
 STAGEA_SRUN_CPU_BIND="${STAGEA_SRUN_CPU_BIND:-cores}"  # passed to srun --cpu-bind
+STAGEA_PROC_TREE_METRICS="${STAGEA_PROC_TREE_METRICS:-1}"  # 1 -> aggregate payload descendants in proc_metrics
 
 export TMPDIR="${SLURM_TMPDIR:-/tmp}"
 echo "=== Storage check ==="
@@ -167,6 +168,9 @@ start_monitor() {
   # Process-scoped metrics for the launched payload (best effort).
   if [[ -n "${target_pid}" ]] && [[ "${target_pid}" =~ ^[0-9]+$ ]] && (( target_pid > 0 )); then
     args+=( "--pid" "${target_pid}" )
+    if [[ "${STAGEA_PROC_TREE_METRICS}" == "1" ]]; then
+      args+=( "--pid-tree" )
+    fi
   fi
 
   # Only pass --gpus if we have any
@@ -359,18 +363,37 @@ esac
 
 if [[ "${STAGEA_USE_SRUN_BIND}" == "1" ]] && command -v srun >/dev/null 2>&1; then
   echo "[StageA] launching with srun --cpu-bind=${STAGEA_SRUN_CPU_BIND}"
+  PAYLOAD_PID_FILE="${COMPUTE_METRICS_DIR}/${PREFIX}.payload.pid"
+  rm -f "${PAYLOAD_PID_FILE}"
   srun --ntasks=1 --cpus-per-task="${NUM_CORES}" --cpu-bind="${STAGEA_SRUN_CPU_BIND}" \
+    bash -c 'echo "$$" > "$1"; shift; exec "$@"' bash "${PAYLOAD_PID_FILE}" \
     python3 "${SCRIPT}" "${PY_ARGS[@]}" &
   PAYLOAD_PID=$!
+  MONITOR_TARGET_PID=""
+  for _ in $(seq 1 100); do
+    if [[ -s "${PAYLOAD_PID_FILE}" ]]; then
+      read -r MONITOR_TARGET_PID < "${PAYLOAD_PID_FILE}" || true
+      break
+    fi
+    kill -0 "${PAYLOAD_PID}" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [[ -z "${MONITOR_TARGET_PID}" || ! "${MONITOR_TARGET_PID}" =~ ^[0-9]+$ ]]; then
+    MONITOR_TARGET_PID="${PAYLOAD_PID}"
+    echo "[StageA] WARNING: could not resolve payload PID from srun; falling back to wrapper PID ${PAYLOAD_PID}"
+  fi
 else
   echo "[StageA] launching directly (srun binding disabled/unavailable)"
   python3 "${SCRIPT}" "${PY_ARGS[@]}" &
   PAYLOAD_PID=$!
+  MONITOR_TARGET_PID="${PAYLOAD_PID}"
 fi
 
 if [[ "${MAKE_SHARDS_ONLY:-0}" != "1" ]]; then
-  start_monitor "${PAYLOAD_PID}"
+  start_monitor "${MONITOR_TARGET_PID}"
 fi
 
 wait "${PAYLOAD_PID}"
-exit $?
+rc=$?
+rm -f "${PAYLOAD_PID_FILE:-}" 2>/dev/null || true
+exit "${rc}"
