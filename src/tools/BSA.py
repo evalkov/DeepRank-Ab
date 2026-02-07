@@ -114,7 +114,10 @@ class BSA_Freesasa(object):
 
         # Pre-fetch residue centroids once (used for bsa_data_xyz).
         residue_xyz = {}
-        for chain_id, resseq in unique_res:
+        for residue in unique_res:
+            # Contact-residue tuples can include extra fields (e.g., residue name).
+            # We only need chain ID and residue number for centroid lookup.
+            chain_id, resseq = residue[0], residue[1]
             coords = self.sql.get('x,y,z', resSeq=resseq, chainID=chain_id)
             residue_xyz[(chain_id, resseq)] = np.mean(coords, 0) if coords else np.zeros(3)
 
