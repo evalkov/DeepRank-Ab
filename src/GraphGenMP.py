@@ -19,6 +19,32 @@ sys.path.append(os.path.dirname(__file__))
 # Global worker configuration (set once per worker process)
 _WORKER_CONFIG = None
 
+def _env_int(name, default):
+    """Read int env var with safe fallback."""
+    raw = os.environ.get(name, "")
+    if raw == "":
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+def _env_float(name, default):
+    """Read float env var with safe fallback."""
+    raw = os.environ.get(name, "")
+    if raw == "":
+        return default
+    try:
+        return float(raw)
+    except Exception:
+        return default
+
+def _env_flag(name, default=False):
+    raw = os.environ.get(name, "")
+    if raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
 
 def _worker_init(config):
     """
@@ -80,7 +106,7 @@ def _write_graph_progress(progress_file, done, total):
 
 
 def _writer_process(result_queue, outfile, total_count, use_tqdm=True,
-                    progress_file=None):
+                    progress_file=None, telemetry=False, log_every_s=30.0):
     """
     Writer process: drain result queue and write graphs to HDF5.
     Runs continuously until receiving sentinel value.
@@ -91,6 +117,8 @@ def _writer_process(result_queue, outfile, total_count, use_tqdm=True,
     errors = []
     processed = 0
     last_progress_write = 0.0
+    t_start = _time.monotonic()
+    last_log = t_start
 
     # Open HDF5 file once
     with h5py.File(outfile, 'w') as f5:
@@ -114,6 +142,12 @@ def _writer_process(result_queue, outfile, total_count, use_tqdm=True,
                 if progress_file and (_time.monotonic() - last_progress_write) >= 2.0:
                     _write_graph_progress(progress_file, processed, total_count)
                     last_progress_write = _time.monotonic()
+                if telemetry and (_time.monotonic() - last_log) >= log_every_s:
+                    elapsed = max(_time.monotonic() - t_start, 1e-9)
+                    rate = processed / elapsed
+                    print(f"[graph-writer] processed={processed}/{total_count} "
+                          f"written={graphs_written} errors={len(errors)} rate={rate:.2f}/s")
+                    last_log = _time.monotonic()
                 continue
 
             # Write graph to HDF5
@@ -130,6 +164,12 @@ def _writer_process(result_queue, outfile, total_count, use_tqdm=True,
             if progress_file and (_time.monotonic() - last_progress_write) >= 2.0:
                 _write_graph_progress(progress_file, processed, total_count)
                 last_progress_write = _time.monotonic()
+            if telemetry and (_time.monotonic() - last_log) >= log_every_s:
+                elapsed = max(_time.monotonic() - t_start, 1e-9)
+                rate = processed / elapsed
+                print(f"[graph-writer] processed={processed}/{total_count} "
+                      f"written={graphs_written} errors={len(errors)} rate={rate:.2f}/s")
+                last_log = _time.monotonic()
 
         if use_tqdm:
             pbar.close()
@@ -278,6 +318,8 @@ class GraphHDF5(object):
         - Writer process drains result queue and writes to HDF5
         - No pickle intermediate files
         """
+        import time as _time
+
         # Configuration passed to each worker once at initialization
         worker_config = {
             'graph_type': self.graph_type,
@@ -294,15 +336,21 @@ class GraphHDF5(object):
         if graph_progress_file:
             _write_graph_progress(graph_progress_file, 0, len(pdbs))
 
-        # Result queue with bounded size to prevent memory overflow
-        # Adjust maxsize based on available memory (50-100 is reasonable)
-        result_queue = Queue(maxsize=100)
+        telemetry = _env_flag("GRAPH_PIPELINE_TELEMETRY", default=False)
+        writer_log_every_s = _env_float("GRAPH_WRITER_LOG_EVERY_S", default=30.0)
+        queue_maxsize = max(1, _env_int("GRAPH_RESULT_QUEUE_MAXSIZE", default=100))
+
+        # Result queue with bounded size to prevent memory overflow.
+        result_queue = Queue(maxsize=queue_maxsize)
+        if telemetry:
+            print(f"[graph-pipeline] workers={nproc} queue_maxsize={queue_maxsize} "
+                  f"writer_log_every_s={writer_log_every_s}")
         
         # Start writer process
         writer = Process(
             target=_writer_process,
             args=(result_queue, outfile, len(pdbs), use_tqdm,
-                  graph_progress_file)
+                  graph_progress_file, telemetry, writer_log_every_s)
         )
         writer.start()
         
@@ -313,11 +361,21 @@ class GraphHDF5(object):
             initargs=(worker_config,)
         )
         
+        enqueued = 0
+        t_enqueue_start = _time.monotonic()
+        last_enqueue_log = t_enqueue_start
+
         # Process graphs and feed results to queue
         # imap_unordered for better load balancing (results arrive as completed)
         try:
             for result in pool.imap_unordered(_worker_process_graph, pdbs, chunksize=1):
                 result_queue.put(result)
+                enqueued += 1
+                if telemetry and (_time.monotonic() - last_enqueue_log) >= writer_log_every_s:
+                    elapsed = max(_time.monotonic() - t_enqueue_start, 1e-9)
+                    rate = enqueued / elapsed
+                    print(f"[graph-pipeline] enqueued={enqueued}/{len(pdbs)} rate={rate:.2f}/s")
+                    last_enqueue_log = _time.monotonic()
         except KeyboardInterrupt:
             print("\nInterrupted by user")
             pool.terminate()

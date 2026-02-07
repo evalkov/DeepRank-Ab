@@ -32,6 +32,15 @@ stage_a:
   glob: "**/*.pdb"      # Glob pattern to find PDBs
   # Voronota settings
   voro_omp_threads: 1             # OpenMP threads per voronota call
+  # Runtime/process controls
+  split_mode: false               # true => submit Stage A as two arrays: prep_graphs then cluster_only
+  strict_affinity: 0              # 1 => fail task if effective cpuset < requested cores
+  use_srun_bind: 1                # 1 => launch Stage A payload via srun --cpu-bind
+  srun_cpu_bind: cores            # passed to srun --cpu-bind
+  graph_pipeline_telemetry: 0     # 1 => periodic graph enqueue/writer throughput logs
+  graph_result_queue_maxsize: 100 # queue size between graph workers and writer
+  graph_writer_log_every_s: 30    # telemetry log interval (seconds)
+  anarci_parallel_batches: 1      # >1 => split ANARCI calls into parallel batches
 
 # Stage B (GPU): ESM embeddings + inference
 stage_b:

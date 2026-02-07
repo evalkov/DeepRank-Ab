@@ -2,6 +2,7 @@ import json
 import warnings
 from pathlib import Path
 from multiprocessing import Pool
+from concurrent.futures import ProcessPoolExecutor
 import os
 
 from Bio.PDB import PDBParser
@@ -389,6 +390,20 @@ def _apply_numbering_to_mapping(mapping_entry, numbering_entry):
 
     return model_key, ann
 
+def _run_anarci_batch(records):
+    """
+    Run ANARCI for one batch of records.
+    Top-level helper so it can be used by ProcessPoolExecutor.
+    """
+    numbering, _, _ = anarci(
+        records,
+        scheme="imgt",
+        assign_germline=True,
+        output=False,
+        hmmerpath=hmmscan_path,
+    )
+    return numbering
+
 
 def annotate_folder_one_by_one_mp(
     folder: Path,
@@ -456,14 +471,28 @@ def annotate_folder_one_by_one_mp(
             json.dump({}, f, indent=2)
         return
 
-    # Phase 2: Single batched ANARCI call (main optimization)
-    numbering, _, _ = anarci(
-        all_records,
-        scheme="imgt",
-        assign_germline=True,
-        output=False,
-        hmmerpath=hmmscan_path,
-    )
+    # Phase 2: Batched ANARCI call(s)
+    # Set ANARCI_PARALLEL_BATCHES>1 to split very large record sets across processes.
+    anarci_parallel_batches = max(1, int(os.environ.get("ANARCI_PARALLEL_BATCHES", "1")))
+    if anarci_parallel_batches <= 1 or len(all_records) < 32:
+        numbering, _, _ = anarci(
+            all_records,
+            scheme="imgt",
+            assign_germline=True,
+            output=False,
+            hmmerpath=hmmscan_path,
+        )
+    else:
+        n_batches = min(anarci_parallel_batches, len(all_records))
+        chunk_size = (len(all_records) + n_batches - 1) // n_batches
+        chunks = [all_records[i:i + chunk_size] for i in range(0, len(all_records), chunk_size)]
+        with ProcessPoolExecutor(max_workers=len(chunks)) as executor:
+            numbering_chunks = list(executor.map(_run_anarci_batch, chunks))
+        numbering = [item for chunk in numbering_chunks for item in chunk]
+        if len(numbering) != len(all_mappings):
+            raise RuntimeError(
+                f"ANARCI numbering length mismatch: got {len(numbering)} entries for {len(all_mappings)} mappings"
+            )
 
     # Phase 3: Map results back to annotations
     all_annotations = {}
@@ -520,5 +549,4 @@ def annotate_folder_one_by_one_mp_single_fasta(
     out_file = out_dir / "annotations_cdrs.json"
     with open(out_file, "w") as f:
         json.dump(all_annotations, f, indent=2)
-
 

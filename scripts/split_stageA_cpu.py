@@ -354,6 +354,95 @@ class StageAResult:
     cluster_s: float
     graphs_bytes: int
 
+def _result_from_meta_dict(d: Dict) -> StageAResult:
+    """Build StageAResult from potentially partial metadata."""
+    return StageAResult(
+        shard_id=str(d.get("shard_id", "")),
+        n_inputs=int(d.get("n_inputs", 0)),
+        n_models=int(d.get("n_models", 0)),
+        n_ok=int(d.get("n_ok", 0)),
+        n_fail=int(d.get("n_fail", 0)),
+        prep_s=float(d.get("prep_s", 0.0)),
+        annotate_s=float(d.get("annotate_s", 0.0)),
+        graphs_s=float(d.get("graphs_s", 0.0)),
+        cluster_s=float(d.get("cluster_s", 0.0)),
+        graphs_bytes=int(d.get("graphs_bytes", 0)),
+    )
+
+def run_stageA_cluster_only(
+    shard_id: str,
+    exchange_shards_dir: Path,
+    do_cluster: bool,
+) -> StageAResult:
+    """
+    Cluster-only phase for split Stage A mode.
+    Expects graphs.h5 to exist from a prior prep+graphs phase.
+    """
+    t0 = perf_counter()
+    shard_dir = exchange_shards_dir / f"shard_{shard_id}"
+    safe_mkdir(shard_dir)
+
+    done = shard_dir / "STAGEA_DONE"
+    graphs_done = shard_dir / "STAGEA_GRAPHS_DONE"
+    graphs_out = shard_dir / "graphs.h5"
+    meta_out = shard_dir / "meta_stageA.json"
+
+    if done.exists() and meta_out.exists():
+        meta = json.loads(meta_out.read_text())
+        return _result_from_meta_dict(meta.get("result", {}))
+
+    if not graphs_out.is_file():
+        raise FileNotFoundError(f"Missing graphs for cluster-only phase: {graphs_out}")
+    if not graphs_done.exists():
+        raise FileNotFoundError(f"Missing prep marker for cluster-only phase: {graphs_done}")
+
+    existing_meta: Dict = {}
+    if meta_out.exists():
+        try:
+            existing_meta = json.loads(meta_out.read_text())
+        except Exception:
+            existing_meta = {}
+
+    started_at = datetime.now().isoformat(timespec="seconds")
+    prev_res = existing_meta.get("result", {})
+    _prog = dict(
+        shard_dir=shard_dir,
+        shard_id=shard_id,
+        started_at=started_at,
+        n_inputs=int(prev_res.get("n_inputs", 0)),
+        n_models=int(prev_res.get("n_models", 0)),
+        prep_done=int(prev_res.get("n_ok", 0) + prev_res.get("n_fail", 0)),
+        prep_ok=int(prev_res.get("n_ok", 0)),
+        prep_fail=int(prev_res.get("n_fail", 0)),
+    )
+    _write_progress(stage="cluster", **_prog)
+
+    cluster_s = 0.0
+    if do_cluster:
+        t_cluster = perf_counter()
+        cluster_mcl(graphs_out)
+        cluster_s = perf_counter() - t_cluster
+
+    prev_res["cluster_s"] = cluster_s
+    prev_res["graphs_bytes"] = graphs_out.stat().st_size
+    prev_res.setdefault("shard_id", shard_id)
+    result = _result_from_meta_dict(prev_res)
+
+    updated_meta = dict(existing_meta) if existing_meta else {}
+    updated_meta.update({
+        "stage": "A",
+        "shard_id": shard_id,
+        "shard_dir": str(shard_dir),
+        "do_cluster": bool(do_cluster),
+        "stagea_phase": "cluster_only",
+        "result": asdict(result),
+        "wall_s_cluster_only": perf_counter() - t0,
+    })
+    atomic_write_json(meta_out, updated_meta)
+    atomic_write_text(done, "ok\n")
+    _write_progress(stage="done", **_prog)
+    return result
+
 def run_stageA_one_shard(
     shard_id: str,
     shard_list: Path,
@@ -365,6 +454,8 @@ def run_stageA_one_shard(
     num_cores: int,
     tmp_base: Optional[Path],
     do_cluster: bool,
+    publish_stagea_done: bool = True,
+    stagea_phase: str = "full",
 ) -> StageAResult:
     """
     Produces shards/shard_<id>/graphs.h5 + manifest + metadata + STAGEA_DONE
@@ -375,9 +466,17 @@ def run_stageA_one_shard(
 
     # Idempotency: if STAGEA_DONE exists, skip (safe for requeues)
     done = shard_dir / "STAGEA_DONE"
+    graphs_done = shard_dir / "STAGEA_GRAPHS_DONE"
+    meta_path = shard_dir / "meta_stageA.json"
     if done.exists():
-        meta = json.loads((shard_dir / "meta_stageA.json").read_text())
-        return StageAResult(**meta["result"])
+        meta = json.loads(meta_path.read_text())
+        return _result_from_meta_dict(meta.get("result", {}))
+    if (not publish_stagea_done) and graphs_done.exists() and meta_path.exists():
+        meta = json.loads(meta_path.read_text())
+        return _result_from_meta_dict(meta.get("result", {}))
+    if publish_stagea_done and graphs_done.exists() and (shard_dir / "graphs.h5").is_file():
+        # If prep+graphs already completed, skip straight to cluster and finalize.
+        return run_stageA_cluster_only(shard_id=shard_id, exchange_shards_dir=exchange_shards_dir, do_cluster=do_cluster)
 
     started_at = datetime.now().isoformat(timespec="seconds")
     _prog = dict(shard_dir=shard_dir, shard_id=shard_id, started_at=started_at,
@@ -389,136 +488,143 @@ def run_stageA_one_shard(
     fasta_dir = safe_mkdir(local_root / "fastas")
     anno_dir = safe_mkdir(local_root / "annotations")
 
-    # Read input list
-    inputs = [Path(x.strip()) for x in shard_list.read_text().splitlines() if x.strip()]
-    if not inputs:
-        raise SystemExit(f"{shard_list}: empty")
-    _prog["n_inputs"] = len(inputs)
+    try:
+        # Read input list
+        inputs = [Path(x.strip()) for x in shard_list.read_text().splitlines() if x.strip()]
+        if not inputs:
+            raise SystemExit(f"{shard_list}: empty")
+        _prog["n_inputs"] = len(inputs)
 
-    # Stage PDBs to local (parallel I/O for network filesystems)
-    def _copy_pdb(src: Path) -> Path:
-        dst = pdbs_dir / src.name
-        shutil.copy2(src, dst)
-        return dst
+        # Stage PDBs to local (parallel I/O for network filesystems)
+        def _copy_pdb(src: Path) -> Path:
+            dst = pdbs_dir / src.name
+            shutil.copy2(src, dst)
+            return dst
 
-    max_copy_workers = min(16, len(inputs)) if inputs else 1
-    with ThreadPoolExecutor(max_workers=max_copy_workers) as ex:
-        list(ex.map(_copy_pdb, inputs))
-    _write_progress(stage="copy", **_prog)
+        max_copy_workers = min(16, len(inputs)) if inputs else 1
+        with ThreadPoolExecutor(max_workers=max_copy_workers) as ex:
+            list(ex.map(_copy_pdb, inputs))
+        _write_progress(stage="copy", **_prog)
 
-    staged = sorted(pdbs_dir.glob("*.pdb"))
+        staged = sorted(pdbs_dir.glob("*.pdb"))
 
-    # Expand only if ensemble
-    expanded: List[Path] = []
-    for p in staged:
-        expanded.extend(split_models_if_ensemble(p, local_root / "models" / p.stem))
-    _prog["n_models"] = len(expanded)
-    _write_progress(stage="expand", **_prog)
+        # Expand only if ensemble
+        expanded: List[Path] = []
+        for p in staged:
+            expanded.extend(split_models_if_ensemble(p, local_root / "models" / p.stem))
+        _prog["n_models"] = len(expanded)
+        _write_progress(stage="expand", **_prog)
 
-    # PREP: build merged 2-chain PDBs + HL fasta (for annotate), and manifest for ESM later
-    # Parallelized across cores for better throughput
-    t1 = perf_counter()
-    prep_args = [(p, heavy, light, antigen, merged_dir, fasta_dir) for p in expanded]
-    max_prep_workers = min(num_cores, len(expanded)) if expanded else 1
+        # PREP: build merged 2-chain PDBs + HL fasta (for annotate), and manifest for ESM later
+        # Parallelized across cores for better throughput
+        t1 = perf_counter()
+        prep_args = [(p, heavy, light, antigen, merged_dir, fasta_dir) for p in expanded]
+        max_prep_workers = min(num_cores, len(expanded)) if expanded else 1
 
-    ok = 0
-    fail = 0
-    manifest_rows: List[str] = []
+        ok = 0
+        fail = 0
+        manifest_rows: List[str] = []
 
-    with ProcessPoolExecutor(max_workers=max_prep_workers) as ex:
-        for stem, seqH, seqL, seqAg, success in ex.map(_prep_one_pdb, prep_args):
-            if success:
-                # Manifest for ESM:
-                seqA = (seqH or "") + (seqL or "")
-                seqB = (seqAg or "")
-                if seqA:
-                    manifest_rows.append(f"{stem}.A\t{stem}\tA\t{len(seqA)}\t{seqA}\n")
-                if seqB:
-                    manifest_rows.append(f"{stem}.B\t{stem}\tB\t{len(seqB)}\t{seqB}\n")
-                ok += 1
-            else:
-                fail += 1
-            _prog.update(prep_done=ok + fail, prep_ok=ok, prep_fail=fail)
-            _write_progress(stage="prep", **_prog)
+        with ProcessPoolExecutor(max_workers=max_prep_workers) as ex:
+            for stem, seqH, seqL, seqAg, success in ex.map(_prep_one_pdb, prep_args):
+                if success:
+                    # Manifest for ESM:
+                    seqA = (seqH or "") + (seqL or "")
+                    seqB = (seqAg or "")
+                    if seqA:
+                        manifest_rows.append(f"{stem}.A\t{stem}\tA\t{len(seqA)}\t{seqA}\n")
+                    if seqB:
+                        manifest_rows.append(f"{stem}.B\t{stem}\tB\t{len(seqB)}\t{seqB}\n")
+                    ok += 1
+                else:
+                    fail += 1
+                _prog.update(prep_done=ok + fail, prep_ok=ok, prep_fail=fail)
+                _write_progress(stage="prep", **_prog)
 
-    prep_s = perf_counter() - t1
+        prep_s = perf_counter() - t1
 
-    # Annotate (CPU)
-    _write_progress(stage="annotate", **_prog)
-    t2 = perf_counter()
-    annotate_folder_one_by_one_mp(
-        merged_dir,
-        fasta_dir,
-        output_dir=str(anno_dir),
-        n_cores=num_cores,
-        antigen_chainid=antigen_chainid_for_graph,
-    )
-    annotate_s = perf_counter() - t2
+        # Annotate (CPU)
+        _write_progress(stage="annotate", **_prog)
+        t2 = perf_counter()
+        annotate_folder_one_by_one_mp(
+            merged_dir,
+            fasta_dir,
+            output_dir=str(anno_dir),
+            n_cores=num_cores,
+            antigen_chainid=antigen_chainid_for_graph,
+        )
+        annotate_s = perf_counter() - t2
 
-    region_json = anno_dir / "annotations_cdrs.json"
-    correct_region_json(region_json)
+        region_json = anno_dir / "annotations_cdrs.json"
+        correct_region_json(region_json)
 
-    # Graphs (CPU)
-    _write_progress(stage="graphs", **_prog)
-    t3 = perf_counter()
-    graphs_local = local_root / "graphs.h5"
-    gen_graphs(merged_dir, graphs_local, region_json, num_cores, antigen_chainid_for_graph, tmp_base,
-               graph_progress_file=shard_dir / "graph_progress.json")
-    ensure_zero_embedding(graphs_local)
-    graphs_s = perf_counter() - t3
+        # Graphs (CPU)
+        _write_progress(stage="graphs", **_prog)
+        t3 = perf_counter()
+        graphs_local = local_root / "graphs.h5"
+        gen_graphs(merged_dir, graphs_local, region_json, num_cores, antigen_chainid_for_graph, tmp_base,
+                   graph_progress_file=shard_dir / "graph_progress.json")
+        ensure_zero_embedding(graphs_local)
+        graphs_s = perf_counter() - t3
 
-    # Cluster (CPU) — keep it here so GPU stage is truly "GPU-only"
-    cluster_s = 0.0
-    if do_cluster:
-        _write_progress(stage="cluster", **_prog)
-        t4 = perf_counter()
-        cluster_mcl(graphs_local)
-        cluster_s = perf_counter() - t4
+        # Cluster (CPU) — keep it here so GPU stage is truly "GPU-only"
+        cluster_s = 0.0
+        if do_cluster:
+            _write_progress(stage="cluster", **_prog)
+            t4 = perf_counter()
+            cluster_mcl(graphs_local)
+            cluster_s = perf_counter() - t4
 
-    # Publish artifacts atomically
-    graphs_out = shard_dir / "graphs.h5"
-    manifest_out = shard_dir / "manifest.tsv.gz"
-    meta_out = shard_dir / "meta_stageA.json"
+        # Publish artifacts atomically
+        graphs_out = shard_dir / "graphs.h5"
+        manifest_out = shard_dir / "manifest.tsv.gz"
+        meta_out = shard_dir / "meta_stageA.json"
 
-    tmp_graphs = graphs_out.with_suffix(".h5.tmp")
-    shutil.copy2(graphs_local, tmp_graphs)
-    tmp_graphs.replace(graphs_out)
+        tmp_graphs = graphs_out.with_suffix(".h5.tmp")
+        shutil.copy2(graphs_local, tmp_graphs)
+        tmp_graphs.replace(graphs_out)
 
-    gz_write_tsv(
-        manifest_out,
-        header="label\tmol\tchain\tlength\tsequence\n",
-        rows=manifest_rows,
-    )
+        gz_write_tsv(
+            manifest_out,
+            header="label\tmol\tchain\tlength\tsequence\n",
+            rows=manifest_rows,
+        )
 
-    res = StageAResult(
-        shard_id=shard_id,
-        n_inputs=len(inputs),
-        n_models=len(expanded),
-        n_ok=ok,
-        n_fail=fail,
-        prep_s=prep_s,
-        annotate_s=annotate_s,
-        graphs_s=graphs_s,
-        cluster_s=cluster_s,
-        graphs_bytes=graphs_out.stat().st_size,
-    )
+        res = StageAResult(
+            shard_id=shard_id,
+            n_inputs=len(inputs),
+            n_models=len(expanded),
+            n_ok=ok,
+            n_fail=fail,
+            prep_s=prep_s,
+            annotate_s=annotate_s,
+            graphs_s=graphs_s,
+            cluster_s=cluster_s,
+            graphs_bytes=graphs_out.stat().st_size,
+        )
 
-    atomic_write_json(meta_out, {
-        "stage": "A",
-        "shard_id": shard_id,
-        "shard_list": str(shard_list),
-        "shard_dir": str(shard_dir),
-        "chains": {"heavy": heavy, "light": light, "antigen": antigen, "antigen_chainid_for_graph": antigen_chainid_for_graph},
-        "num_cores": num_cores,
-        "do_cluster": bool(do_cluster),
-        "result": asdict(res),
-        "wall_s": perf_counter() - t0,
-    })
+        atomic_write_json(meta_out, {
+            "stage": "A",
+            "shard_id": shard_id,
+            "shard_list": str(shard_list),
+            "shard_dir": str(shard_dir),
+            "chains": {"heavy": heavy, "light": light, "antigen": antigen, "antigen_chainid_for_graph": antigen_chainid_for_graph},
+            "num_cores": num_cores,
+            "do_cluster": bool(do_cluster),
+            "stagea_phase": stagea_phase,
+            "result": asdict(res),
+            "wall_s": perf_counter() - t0,
+        })
 
-    atomic_write_text(done, "ok\n")
-    _write_progress(stage="done", **_prog)
-    shutil.rmtree(local_root, ignore_errors=True)
-    return res
+        atomic_write_text(graphs_done, "ok\n")
+        if publish_stagea_done:
+            atomic_write_text(done, "ok\n")
+            _write_progress(stage="done", **_prog)
+        else:
+            _write_progress(stage="graphs_done", **_prog)
+        return res
+    finally:
+        shutil.rmtree(local_root, ignore_errors=True)
 
 
 # -----------------------
@@ -543,8 +649,14 @@ def main() -> int:
     ap.add_argument("--num-cores", type=int, default=int(os.environ.get("NUM_CORES", "32")))
     ap.add_argument("--tmp-base", default=os.environ.get("TMPDIR", ""))
     ap.add_argument("--no-cluster", action="store_true", help="Skip MCL clustering in Stage A (not recommended)")
+    ap.add_argument("--prep-graphs-only", action="store_true", help="Run copy/prep/annotate/graphs and publish STAGEA_GRAPHS_DONE only")
+    ap.add_argument("--cluster-only", action="store_true", help="Run clustering/finalize only; requires existing graphs.h5 and STAGEA_GRAPHS_DONE")
 
     args = ap.parse_args()
+
+    if args.prep_graphs_only and args.cluster_only:
+        print("ERROR: use at most one of --prep-graphs-only or --cluster-only", file=os.sys.stderr)
+        return 2
 
     run_root = Path(args.run_root).resolve()
     shard_lists_dir = safe_mkdir(run_root / "shard_lists")
@@ -571,22 +683,31 @@ def main() -> int:
         raise SystemExit(f"Missing shard list: {shard_list}")
 
     tmp_base = Path(args.tmp_base) if args.tmp_base else None
-    res = run_stageA_one_shard(
-        shard_id=args.shard_id,
-        shard_list=shard_list,
-        exchange_shards_dir=shards_dir,
-        heavy=args.heavy,
-        light=args.light,
-        antigen=args.antigen,
-        antigen_chainid_for_graph=args.antigen_chainid_for_graph,
-        num_cores=args.num_cores,
-        tmp_base=tmp_base,
-        do_cluster=(not args.no_cluster),
-    )
+    if args.cluster_only:
+        res = run_stageA_cluster_only(
+            shard_id=args.shard_id,
+            exchange_shards_dir=shards_dir,
+            do_cluster=(not args.no_cluster),
+        )
+    else:
+        res = run_stageA_one_shard(
+            shard_id=args.shard_id,
+            shard_list=shard_list,
+            exchange_shards_dir=shards_dir,
+            heavy=args.heavy,
+            light=args.light,
+            antigen=args.antigen,
+            antigen_chainid_for_graph=args.antigen_chainid_for_graph,
+            num_cores=args.num_cores,
+            tmp_base=tmp_base,
+            do_cluster=(not args.no_cluster),
+            publish_stagea_done=(not args.prep_graphs_only),
+            stagea_phase=("prep_graphs" if args.prep_graphs_only else "full"),
+        )
     gb = res.graphs_bytes / (1024**3)
-    print(f"✓ StageA shard_{res.shard_id}: graphs={gb:.2f} GB ok={res.n_ok} fail={res.n_fail}")
+    phase = "cluster_only" if args.cluster_only else ("prep_graphs" if args.prep_graphs_only else "full")
+    print(f"✓ StageA[{phase}] shard_{res.shard_id}: graphs={gb:.2f} GB ok={res.n_ok} fail={res.n_fail}")
     return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -131,6 +131,13 @@ CPU-bound stage that processes PDBs into graph representations.
 | `MAX_PER_SHARD` | `100` | Maximum PDBs per shard |
 | `GLOB_PAT` | `**/*.pdb` | PDB file glob pattern |
 | `FORCE_RESHARD` | `0` | Set to `1` to rebuild shard lists |
+| `STAGEA_PHASE` | `full` | `full`, `prep_graphs`, or `cluster_only` |
+| `STAGEA_STRICT_AFFINITY` | `0` | Fail if effective cpuset is smaller than requested cores |
+| `STAGEA_USE_SRUN_BIND` | `1` | Launch payload via `srun --cpu-bind` when available |
+| `STAGEA_SRUN_CPU_BIND` | `cores` | Value passed to `srun --cpu-bind` |
+| `GRAPH_PIPELINE_TELEMETRY` | `0` | Enable graph writer/enqueue throughput logs |
+| `GRAPH_RESULT_QUEUE_MAXSIZE` | `100` | Max buffered graph results between workers/writer |
+| `ANARCI_PARALLEL_BATCHES` | `1` | Number of parallel ANARCI batches in annotation phase |
 
 ### Array Sizing
 
@@ -139,6 +146,10 @@ CPU-bound stage that processes PDBs into graph representations.
 - `M`: `max_concurrent_a` from YAML config (default: 20)
 
 Task 0 builds the shard lists; other tasks wait for completion before processing.
+
+When `stage_a.split_mode: true`, Stage A is submitted as two dependent arrays:
+1. `prep_graphs` phase (copy/prep/annotate/graphs; writes `STAGEA_GRAPHS_DONE`)
+2. `cluster_only` phase (MCL + finalize; writes `STAGEA_DONE`)
 
 ## Stage B: GPU Inference
 

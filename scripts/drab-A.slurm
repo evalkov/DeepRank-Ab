@@ -20,6 +20,7 @@ DEEPRANK_ROOT="$(readlink -f "$DEEPRANK_ROOT")"
 HEAVY="${HEAVY:-H}"
 LIGHT="${LIGHT:--}"
 ANTIGEN="${ANTIGEN:-T}"
+STAGEA_PHASE="${STAGEA_PHASE:-full}"   # full | prep_graphs | cluster_only
 
 # Auto-detect cores: use SLURM allocation, fall back to nproc
 NUM_CORES="${SLURM_CPUS_PER_TASK:-$(nproc)}"
@@ -27,6 +28,11 @@ TARGET_SHARD_GB="${TARGET_SHARD_GB:-0.1}"
 MIN_PER_SHARD="${MIN_PER_SHARD:-10}"
 MAX_PER_SHARD="${MAX_PER_SHARD:-100}"
 GLOB_PAT="${GLOB_PAT:-**/*.pdb}"
+
+# Runtime safety / launch controls
+STAGEA_STRICT_AFFINITY="${STAGEA_STRICT_AFFINITY:-0}"  # 1 -> fail if effective cpuset < NUM_CORES
+STAGEA_USE_SRUN_BIND="${STAGEA_USE_SRUN_BIND:-1}"      # 1 -> launch payload with srun --cpu-bind
+STAGEA_SRUN_CPU_BIND="${STAGEA_SRUN_CPU_BIND:-cores}"  # passed to srun --cpu-bind
 
 # Voronota parallelization settings:
 # - VORO_OMP_THREADS: OpenMP threads per voronota subprocess (default: 1)
@@ -49,6 +55,43 @@ echo "SLURM_TMPDIR=${SLURM_TMPDIR:-not set}"
 df -h /tmp
 df -h "${SLURM_TMPDIR:-/tmp}" 2>/dev/null || echo "SLURM_TMPDIR not available"
 echo "===================="
+
+echo "=== Runtime env ==="
+echo "STAGEA_PHASE=${STAGEA_PHASE}"
+echo "NUM_CORES=${NUM_CORES}"
+echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-unset}"
+echo "SLURM_CPU_BIND=${SLURM_CPU_BIND:-unset}"
+echo "OMP_NUM_THREADS=${OMP_NUM_THREADS:-unset}"
+echo "MKL_NUM_THREADS=${MKL_NUM_THREADS:-unset}"
+echo "OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-unset}"
+echo "NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-unset}"
+echo "VORO_OMP_THREADS=${VORO_OMP_THREADS:-unset}"
+echo "===================="
+
+_detect_affinity_cpus() {
+  python3 - <<'PY'
+import os
+try:
+    print(len(os.sched_getaffinity(0)))
+except Exception:
+    print("")
+PY
+}
+
+check_effective_affinity() {
+  local eff=""
+  eff="$(_detect_affinity_cpus)"
+  if [[ -n "${eff}" ]]; then
+    echo "[StageA] Effective CPU affinity size=${eff} requested=${NUM_CORES}"
+    if [[ "${STAGEA_STRICT_AFFINITY}" == "1" ]] && [[ "${eff}" -lt "${NUM_CORES}" ]]; then
+      echo "[StageA] ERROR: effective cpuset (${eff}) is smaller than requested cores (${NUM_CORES})."
+      echo "[StageA] Set STAGEA_STRICT_AFFINITY=0 to continue anyway."
+      exit 3
+    fi
+  else
+    echo "[StageA] Affinity probe unavailable on this system (continuing)."
+  fi
+}
 
 SCRIPT="${DEEPRANK_ROOT}/scripts/split_stageA_cpu.py"
 
@@ -297,14 +340,41 @@ echo "[StageA] SHARD_LIST_DIR=${SHARD_LIST_DIR}"
 echo "[StageA] SHARD_ID=${SHARD_ID} (task ${TASK} / ${N_SHARDS})"
 echo "[StageA] CHAINS heavy=${HEAVY} light=${LIGHT} antigen=${ANTIGEN}"
 echo "[StageA] CORES=${NUM_CORES}"
+echo "[StageA] PHASE=${STAGEA_PHASE}"
 echo "[StageA] METRICS prefix=${PREFIX} interval=${COMPUTE_METRICS_INTERVAL}s dir=${COMPUTE_METRICS_DIR}"
 
-python3 "${SCRIPT}" \
-  --pdb-root "${PDB_ROOT}" \
-  --run-root "${RUN_ROOT}" \
-  --shard-id "${SHARD_ID}" \
-  --heavy "${HEAVY}" \
-  --light "${LIGHT}" \
-  --antigen "${ANTIGEN}" \
-  --num-cores "${NUM_CORES}"
+check_effective_affinity
 
+PY_ARGS=(
+  --pdb-root "${PDB_ROOT}"
+  --run-root "${RUN_ROOT}"
+  --shard-id "${SHARD_ID}"
+  --heavy "${HEAVY}"
+  --light "${LIGHT}"
+  --antigen "${ANTIGEN}"
+  --num-cores "${NUM_CORES}"
+)
+
+case "${STAGEA_PHASE}" in
+  full)
+    ;;
+  prep_graphs)
+    PY_ARGS+=(--prep-graphs-only)
+    ;;
+  cluster_only)
+    PY_ARGS+=(--cluster-only)
+    ;;
+  *)
+    echo "[StageA] ERROR: unknown STAGEA_PHASE=${STAGEA_PHASE} (expected full|prep_graphs|cluster_only)"
+    exit 2
+    ;;
+esac
+
+if [[ "${STAGEA_USE_SRUN_BIND}" == "1" ]] && command -v srun >/dev/null 2>&1; then
+  echo "[StageA] launching with srun --cpu-bind=${STAGEA_SRUN_CPU_BIND}"
+  srun --ntasks=1 --cpus-per-task="${NUM_CORES}" --cpu-bind="${STAGEA_SRUN_CPU_BIND}" \
+    python3 "${SCRIPT}" "${PY_ARGS[@]}"
+else
+  echo "[StageA] launching directly (srun binding disabled/unavailable)"
+  python3 "${SCRIPT}" "${PY_ARGS[@]}"
+fi

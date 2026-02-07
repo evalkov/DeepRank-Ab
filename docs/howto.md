@@ -78,6 +78,17 @@ stage_a:
 
   # Voronota settings
   voro_omp_threads: 1             # OpenMP threads per voronota call
+
+  # Runtime/process controls
+  split_mode: false         # true => submit Stage A in two dependent arrays:
+                            #         prep_graphs then cluster_only
+  strict_affinity: 0        # 1 => fail if effective CPU affinity < requested cores
+  use_srun_bind: 1          # 1 => launch Stage A payload with srun --cpu-bind
+  srun_cpu_bind: cores      # value passed to srun --cpu-bind
+  graph_pipeline_telemetry: 0     # 1 => graph enqueue/writer throughput logs
+  graph_result_queue_maxsize: 100 # graph worker->writer queue size
+  graph_writer_log_every_s: 30    # telemetry log interval (seconds)
+  anarci_parallel_batches: 1      # >1 => parallel ANARCI batches per shard
 ```
 
 ### Stage B Settings (GPU - ESM Embeddings + Inference)

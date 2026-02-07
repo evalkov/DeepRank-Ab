@@ -259,6 +259,14 @@ def build_env(cfg: PipelineConfig, stage: str, **overrides) -> Dict[str, str]:
         env["MAX_PER_SHARD"] = str(sa.get("max_per_shard", 100))
         env["GLOB_PAT"] = sa.get("glob", "**/*.pdb")
         env["VORO_OMP_THREADS"] = str(sa.get("voro_omp_threads", 1))
+        env["STAGEA_SPLIT_MODE"] = "1" if sa.get("split_mode", False) else "0"
+        env["STAGEA_STRICT_AFFINITY"] = str(sa.get("strict_affinity", 0))
+        env["STAGEA_USE_SRUN_BIND"] = str(sa.get("use_srun_bind", 1))
+        env["STAGEA_SRUN_CPU_BIND"] = str(sa.get("srun_cpu_bind", "cores"))
+        env["GRAPH_PIPELINE_TELEMETRY"] = str(sa.get("graph_pipeline_telemetry", 0))
+        env["GRAPH_RESULT_QUEUE_MAXSIZE"] = str(sa.get("graph_result_queue_maxsize", 100))
+        env["GRAPH_WRITER_LOG_EVERY_S"] = str(sa.get("graph_writer_log_every_s", 30))
+        env["ANARCI_PARALLEL_BATCHES"] = str(sa.get("anarci_parallel_batches", 1))
 
     elif stage == "b":
         sb = cfg.stage_b
@@ -445,6 +453,8 @@ def run_stage_a_processing(
     n_shards: int,
     dependency: Optional[str] = None,
     dry_run: bool = False,
+    env_overrides: Optional[Dict[str, str]] = None,
+    stage_label: str = "A",
 ) -> JobResult:
     """Run Stage A processing for all shards."""
     if n_shards <= 0:
@@ -457,7 +467,7 @@ def run_stage_a_processing(
         )
 
     script = cfg.deeprank_root / "scripts" / "drab-A.slurm"
-    env = build_env(cfg, "a")
+    env = build_env(cfg, "a", **(env_overrides or {}))
 
     # Dynamic array sizing
     max_concurrent = cfg.max_concurrent_a
@@ -470,7 +480,7 @@ def run_stage_a_processing(
         job_name="drab-A",
     )
 
-    return submit_job(args, script, env, dry_run, f"A[0-{n_shards-1}]")
+    return submit_job(args, script, env, dry_run, f"{stage_label}[0-{n_shards-1}]")
 
 
 def run_stage_b(
@@ -564,6 +574,7 @@ def run_pipeline_dynamic(
     # Stage A
     if "a" in stages:
         analysis = analyze_input(cfg)
+        split_mode = bool(cfg.stage_a.get("split_mode", False))
         print(f"\nInput analysis:")
         print(f"  {analysis}")
 
@@ -592,14 +603,42 @@ def run_pipeline_dynamic(
                 print(f"  Estimated shards: {n_shards}")
 
         # Phase 2: Process shards
-        print(f"\n  Phase 2: Processing {n_shards} shards...")
-        proc_result = run_stage_a_processing(cfg, n_shards, prev_job_id, dry_run)
-        results.append(proc_result)
+        if split_mode:
+            print(f"\n  Phase 2a: Processing {n_shards} shards (prep+graphs)...")
+            prep_result = run_stage_a_processing(
+                cfg,
+                n_shards,
+                dependency=prev_job_id,
+                dry_run=dry_run,
+                env_overrides={"STAGEA_PHASE": "prep_graphs"},
+                stage_label="A1",
+            )
+            results.append(prep_result)
+            if not prep_result.success:
+                return results
 
-        if not proc_result.success:
-            return results
+            print(f"\n  Phase 2b: Processing {n_shards} shards (cluster-only)...")
+            cluster_result = run_stage_a_processing(
+                cfg,
+                n_shards,
+                dependency=prep_result.job_id,
+                dry_run=dry_run,
+                env_overrides={"STAGEA_PHASE": "cluster_only"},
+                stage_label="A2",
+            )
+            results.append(cluster_result)
+            if not cluster_result.success:
+                return results
+            prev_job_id = cluster_result.job_id
+        else:
+            print(f"\n  Phase 2: Processing {n_shards} shards...")
+            proc_result = run_stage_a_processing(cfg, n_shards, prev_job_id, dry_run)
+            results.append(proc_result)
 
-        prev_job_id = proc_result.job_id
+            if not proc_result.success:
+                return results
+
+            prev_job_id = proc_result.job_id
 
     # Stage B
     if "b" in stages:
