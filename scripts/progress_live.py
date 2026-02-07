@@ -60,6 +60,104 @@ def _elapsed_str(started_at: Optional[str]) -> str:
         return "-"
 
 
+def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_wall_s(total_s: int) -> str:
+    if total_s < 0:
+        return "-"
+    d, rem = divmod(total_s, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    if d:
+        return f"{d}d {h:02d}h {m:02d}m {s:02d}s"
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    return f"{m}m {s:02d}s"
+
+
+def _find_stage_c_done_time(run_root: Path) -> Tuple[Optional[Path], Optional[datetime]]:
+    logs_dir = run_root / "logs"
+    if not logs_dir.is_dir():
+        return None, None
+
+    pipeline_jobs = _read_json(run_root / "pipeline_jobs.json") or {}
+    jobs = pipeline_jobs.get("jobs", {}) if isinstance(pipeline_jobs, dict) else {}
+    c_jobid = str(jobs.get("C", "")).strip() if isinstance(jobs, dict) else ""
+
+    patterns: List[str] = []
+    if c_jobid:
+        patterns.append(f"drab-C_{c_jobid}.log")
+    patterns.append("drab-C_*.log")
+
+    seen: set = set()
+    done_hits: List[Tuple[datetime, Path]] = []
+    for pat in patterns:
+        for log_path in sorted(logs_dir.glob(pat)):
+            key = str(log_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                txt = log_path.read_text(errors="ignore")
+            except OSError:
+                continue
+            if "[StageC] Done." not in txt:
+                continue
+            try:
+                dt = datetime.fromtimestamp(log_path.stat().st_mtime)
+            except OSError:
+                continue
+            done_hits.append((dt, log_path))
+
+    if not done_hits:
+        return None, None
+
+    done_hits.sort(key=lambda x: x[0], reverse=True)
+    return done_hits[0][1], done_hits[0][0]
+
+
+def _pipeline_final_line(run_root: Path, stage_a: List[dict], stage_b: List[dict]) -> Optional[str]:
+    if not stage_a or not stage_b:
+        return None
+
+    a_done = all(s["status"] == "done" for s in stage_a)
+    b_done = all(s["status"] == "done" for s in stage_b)
+    if not (a_done and b_done):
+        return None
+
+    c_log, end_dt = _find_stage_c_done_time(run_root)
+    if end_dt is None:
+        return None
+
+    starts = []
+    for s in stage_a:
+        dt = _parse_iso(s.get("started_at"))
+        if dt is not None:
+            starts.append(dt)
+    for s in stage_b:
+        dt = _parse_iso(s.get("started_at"))
+        if dt is not None:
+            starts.append(dt)
+    if not starts:
+        return None
+
+    start_dt = min(starts)
+    wall_s = int((end_dt - start_dt).total_seconds())
+
+    start_s = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+    end_s = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+    wall_s_str = _fmt_wall_s(wall_s)
+    source = c_log.name if c_log else "drab-C log"
+    return f"Pipeline complete: start={start_s}  end={end_s}  wall={wall_s_str}  ({source})"
+
+
 def _state_order(state: str) -> int:
     order = {
         "FAILED": 0,
@@ -392,6 +490,9 @@ def print_table(run_root: Path, stage_a: List[dict], stage_b: List[dict], rows: 
     print()
     print(_stage_a_totals(stage_a))
     print(_stage_b_totals(stage_b))
+    final_line = _pipeline_final_line(run_root, stage_a, stage_b)
+    if final_line:
+        print(final_line)
 
 
 def usage() -> None:
