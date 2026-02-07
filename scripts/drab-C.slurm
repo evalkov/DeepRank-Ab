@@ -33,7 +33,16 @@ POLL_TIMEOUT="${STAGEC_POLL_TIMEOUT:-86400}"
 POLL_INTERVAL=2
 MAX_ITER=$(( POLL_TIMEOUT / POLL_INTERVAL ))
 
-TOTAL="$(ls -1 "${SHARD_LIST_DIR}"/shard_*.lst 2>/dev/null | wc -l | tr -d ' ')"
+count_glob() {
+  # Safe under `set -euo pipefail` even when no files match.
+  local pattern="$1"
+  shopt -s nullglob
+  local arr=( ${pattern} )
+  shopt -u nullglob
+  echo "${#arr[@]}"
+}
+
+TOTAL="$(count_glob "${SHARD_LIST_DIR}/shard_*.lst")"
 if (( TOTAL <= 0 )); then
   echo "[StageC] ERROR: no shard lists in ${SHARD_LIST_DIR}" >&2; exit 2
 fi
@@ -41,8 +50,8 @@ fi
 echo "[StageC] Waiting for ${TOTAL} shards (timeout ${POLL_TIMEOUT}s)..."
 PREV_MSG=""
 for _ in $(seq 1 "${MAX_ITER}"); do
-  N_DONE="$(ls -1 "${PRED_DIR}"/DONE_shard_*.ok 2>/dev/null | wc -l | tr -d ' ')"
-  N_FAIL="$(ls -1 "${PRED_DIR}"/FAILED_shard_*.txt 2>/dev/null | wc -l | tr -d ' ')"
+  N_DONE="$(count_glob "${PRED_DIR}/DONE_shard_*.ok")"
+  N_FAIL="$(count_glob "${PRED_DIR}/FAILED_shard_*.txt")"
   GOT=$(( N_DONE + N_FAIL ))
   MSG="${N_DONE} done, ${N_FAIL} failed, $(( TOTAL - GOT )) pending"
   if [[ "${MSG}" != "${PREV_MSG}" ]]; then
@@ -295,4 +304,3 @@ else
 fi
 
 echo "[StageC] Done."
-
