@@ -26,6 +26,51 @@ echo "[StageC] PRED_DIR=${PRED_DIR}"
 echo "[StageC] OUT_DIR=${OUT_DIR}"
 
 # ------------------------------------------------------------
+# 0) Wait for all Stage B shards to finish (done or failed)
+# ------------------------------------------------------------
+SHARD_LIST_DIR="${RUN_ROOT}/shard_lists"
+POLL_TIMEOUT="${STAGEC_POLL_TIMEOUT:-86400}"
+POLL_INTERVAL=2
+MAX_ITER=$(( POLL_TIMEOUT / POLL_INTERVAL ))
+
+TOTAL="$(ls -1 "${SHARD_LIST_DIR}"/shard_*.lst 2>/dev/null | wc -l | tr -d ' ')"
+if (( TOTAL <= 0 )); then
+  echo "[StageC] ERROR: no shard lists in ${SHARD_LIST_DIR}" >&2; exit 2
+fi
+
+echo "[StageC] Waiting for ${TOTAL} shards (timeout ${POLL_TIMEOUT}s)..."
+PREV_MSG=""
+for _ in $(seq 1 "${MAX_ITER}"); do
+  N_DONE="$(ls -1 "${PRED_DIR}"/DONE_shard_*.ok 2>/dev/null | wc -l | tr -d ' ')"
+  N_FAIL="$(ls -1 "${PRED_DIR}"/FAILED_shard_*.txt 2>/dev/null | wc -l | tr -d ' ')"
+  GOT=$(( N_DONE + N_FAIL ))
+  MSG="${N_DONE} done, ${N_FAIL} failed, $(( TOTAL - GOT )) pending"
+  if [[ "${MSG}" != "${PREV_MSG}" ]]; then
+    echo "[StageC] ${MSG}"; PREV_MSG="${MSG}"
+  fi
+  (( GOT >= TOTAL )) && break
+  sleep "${POLL_INTERVAL}"
+done
+
+if (( GOT < TOTAL )); then
+  echo "[StageC] ERROR: timeout — ${GOT}/${TOTAL} accounted for" >&2; exit 2
+fi
+
+# Require ALL shards to have succeeded — no partial merges
+if (( N_FAIL > 0 )); then
+  echo "[StageC] ERROR: ${N_FAIL} of ${TOTAL} shard(s) failed:" >&2
+  for ff in "${PRED_DIR}"/FAILED_shard_*.txt; do
+    sid="$(basename "$ff" .txt)"
+    sid="${sid#FAILED_shard_}"
+    echo "[StageC]   shard_${sid}" >&2
+  done
+  echo "[StageC] Re-run failed shards, then re-submit Stage C." >&2
+  exit 2
+fi
+
+echo "[StageC] All ${TOTAL} shards succeeded"
+
+# ------------------------------------------------------------
 # 1) Gather inputs ONLY for shards that are DONE
 # ------------------------------------------------------------
 mapfile -t DONE_FILES < <(ls -1 "${PRED_DIR}"/DONE_shard_*.ok 2>/dev/null | sort || true)

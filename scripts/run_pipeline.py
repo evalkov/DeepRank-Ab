@@ -300,7 +300,8 @@ def build_sbatch_args(
         args.extend(["--job-name", job_name])
 
     if dependency:
-        args.extend(["--dependency", f"afterok:{dependency}"])
+        dep_type = "afterany" if stage == "c" else "afterok"
+        args.extend(["--dependency", f"{dep_type}:{dependency}"])
 
     # Log files go into {run_root}/logs/
     log_dir = cfg.run_root / "logs"
