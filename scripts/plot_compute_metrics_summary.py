@@ -80,7 +80,21 @@ def pretty_prefix_label(prefix: str) -> str:
     return f"{idx} {node}"
 
 
-def hbar_panel(ax, labels: List[str], values: List[float], title: str, xlabel: str, logx: bool = False):
+def _stage_colors(prefixes: List[str]) -> List[str]:
+    """Return per-row color: light blue for CPU (stageA), light orange for GPU (stageB)."""
+    colors = []
+    for p in prefixes:
+        if p.startswith("stageB"):
+            colors.append("#FFCC80")   # light orange — GPU
+        else:
+            colors.append("#90CAF9")   # light blue   — CPU
+    return colors
+
+
+def hbar_panel(
+    ax, labels: List[str], values: List[float], title: str, xlabel: str,
+    logx: bool = False, colors: Optional[List[str]] = None,
+):
     # Filter NaNs for autoscale, but keep bars aligned (NaNs become 0 and get a hatch)
     import math
 
@@ -95,9 +109,13 @@ def hbar_panel(ax, labels: List[str], values: List[float], title: str, xlabel: s
             vv.append(float(v))
             nan_mask.append(False)
 
-    bars = ax.barh(y, vv)
-    ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=8)
+    bar_colors = colors if colors else ["#90CAF9"] * len(labels)
+    bars = ax.barh(y, vv, color=bar_colors)
+    if len(labels) <= 30:
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels, fontsize=7, family="monospace")
+    else:
+        ax.set_yticks([])
     ax.invert_yaxis()
     ax.set_title(title, fontsize=10)
     ax.set_xlabel(xlabel, fontsize=9)
@@ -199,6 +217,9 @@ def main():
             panels.append((f"GPU{gid} util mean", um, "%"))
             panels.append((f"GPU{gid} util max", ux, "%"))
 
+    # Per-row colors based on stage
+    colors = _stage_colors(prefixes)
+
     # Choose grid: aim ~12–16 panels per page
     n = len(panels)
     # 4 columns tends to read well on letter/A4 landscape; adjust rows accordingly
@@ -217,12 +238,20 @@ def main():
         xlabel = p[2]
         logx = p[3] if len(p) > 3 else False
         ax = fig.add_subplot(nrows, ncols, i)
-        hbar_panel(ax, labels, values, title=title, xlabel=xlabel, logx=logx)
+        hbar_panel(ax, labels, values, title=title, xlabel=xlabel, logx=logx, colors=colors)
 
     # If grid has empty slots, turn them off
     for j in range(len(panels) + 1, nrows * ncols + 1):
         ax = fig.add_subplot(nrows, ncols, j)
         ax.axis("off")
+
+    # Legend for stage colors
+    from matplotlib.patches import Patch
+    legend_handles = [
+        Patch(facecolor="#90CAF9", label="CPU (Stage A)"),
+        Patch(facecolor="#FFCC80", label="GPU (Stage B)"),
+    ]
+    fig.legend(handles=legend_handles, loc="upper right", fontsize=9, framealpha=0.8)
 
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(out_pdf, format="pdf")
