@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -268,6 +269,7 @@ def build_env(cfg: PipelineConfig, stage: str, **overrides) -> Dict[str, str]:
         env["BATCH_SIZE"] = str(sb.get("batch_size", 64))
         env["DL_WORKERS"] = str(sb.get("dl_workers", 8))
         env["PREFETCH_FACTOR"] = str(sb.get("prefetch_factor", 4))
+        env["SHARDS_PER_TASK"] = str(sb.get("shards_per_task", 20))
 
     elif stage == "c":
         sc = cfg.stage_c
@@ -488,9 +490,13 @@ def run_stage_b(
     script = cfg.deeprank_root / "scripts" / "drab-B.slurm"
     env = build_env(cfg, "b")
 
+    # Each GPU task processes SHARDS_PER_TASK CPU shards
+    shards_per_task = cfg.stage_b.get("shards_per_task", 20)
+    n_tasks = math.ceil(n_shards / shards_per_task)
+
     # Dynamic array sizing
     max_concurrent = cfg.max_concurrent_b
-    array_spec = f"0-{n_shards - 1}%{max_concurrent}"
+    array_spec = f"0-{n_tasks - 1}%{max_concurrent}"
 
     args = build_sbatch_args(
         cfg, "b",
@@ -499,7 +505,7 @@ def run_stage_b(
         job_name="drab-B",
     )
 
-    return submit_job(args, script, env, dry_run, f"B[0-{n_shards-1}]")
+    return submit_job(args, script, env, dry_run, f"B[0-{n_tasks-1}]")
 
 
 def run_stage_c(
