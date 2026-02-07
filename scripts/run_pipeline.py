@@ -251,7 +251,9 @@ def build_env(cfg: PipelineConfig, stage: str, **overrides) -> Dict[str, str]:
 
     if stage == "a" or stage == "a_shard":
         sa = cfg.stage_a
-        env["NUM_CORES"] = str(sa.get("cores", 32))
+        # NUM_CORES intentionally not set — drab-A.slurm auto-detects from
+        # SLURM_CPUS_PER_TASK so it uses all allocated cores even when the
+        # node has more than the requested minimum.
         env["TARGET_SHARD_GB"] = str(sa.get("target_shard_gb", 0.1))
         env["MIN_PER_SHARD"] = str(sa.get("min_per_shard", 10))
         env["MAX_PER_SHARD"] = str(sa.get("max_per_shard", 100))

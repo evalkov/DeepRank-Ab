@@ -21,7 +21,8 @@ HEAVY="${HEAVY:-H}"
 LIGHT="${LIGHT:--}"
 ANTIGEN="${ANTIGEN:-T}"
 
-NUM_CORES="${NUM_CORES:-${SLURM_CPUS_PER_TASK}}"
+# Auto-detect cores: use SLURM allocation, fall back to nproc
+NUM_CORES="${SLURM_CPUS_PER_TASK:-$(nproc)}"
 TARGET_SHARD_GB="${TARGET_SHARD_GB:-0.1}"
 MIN_PER_SHARD="${MIN_PER_SHARD:-10}"
 MAX_PER_SHARD="${MAX_PER_SHARD:-100}"
