@@ -298,10 +298,10 @@ def aggregate_job_rows(stage_a: List[dict], stage_b: List[dict]) -> List[dict]:
             work_text = "-"
             if row["a_graphs_total"] > 0 and row["a_graphs_done"] <= row["a_graphs_total"]:
                 work_text = f"graphs {row['a_graphs_done']}/{row['a_graphs_total']}"
-            if row["a_n_models"] > 0:
+            elif row["a_n_models"] > 0:
                 fail_sfx = f" f{row['a_prep_fail']}" if row["a_prep_fail"] else ""
                 model_text = f"models {row['a_prep_ok']}/{row['a_n_models']}{fail_sfx}"
-                work_text = f"{work_text}; {model_text}" if work_text != "-" else model_text
+                work_text = model_text
         else:
             work_text = str(row["b_n_sequences"]) if row["b_n_sequences"] > 0 else "-"
 
