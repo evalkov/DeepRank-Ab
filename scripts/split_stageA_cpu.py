@@ -461,6 +461,9 @@ def run_stageA_one_shard(
     Produces shards/shard_<id>/graphs.h5 + manifest + metadata + STAGEA_DONE
     """
     t0 = perf_counter()
+    # In split mode (`prep_graphs_only`), clustering belongs exclusively to the
+    # `cluster_only` phase. Keep this guard here to prevent redundant MCL work.
+    effective_do_cluster = bool(do_cluster and publish_stagea_done)
     shard_dir = exchange_shards_dir / f"shard_{shard_id}"
     safe_mkdir(shard_dir)
 
@@ -569,7 +572,7 @@ def run_stageA_one_shard(
 
         # Cluster (CPU) — keep it here so GPU stage is truly "GPU-only"
         cluster_s = 0.0
-        if do_cluster:
+        if effective_do_cluster:
             _write_progress(stage="cluster", **_prog)
             t4 = perf_counter()
             cluster_mcl(graphs_local)
@@ -610,7 +613,7 @@ def run_stageA_one_shard(
             "shard_dir": str(shard_dir),
             "chains": {"heavy": heavy, "light": light, "antigen": antigen, "antigen_chainid_for_graph": antigen_chainid_for_graph},
             "num_cores": num_cores,
-            "do_cluster": bool(do_cluster),
+            "do_cluster": bool(effective_do_cluster),
             "stagea_phase": stagea_phase,
             "result": asdict(res),
             "wall_s": perf_counter() - t0,

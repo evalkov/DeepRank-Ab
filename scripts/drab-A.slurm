@@ -350,7 +350,7 @@ case "${STAGEA_PHASE}" in
   full)
     ;;
   prep_graphs)
-    PY_ARGS+=(--prep-graphs-only)
+    PY_ARGS+=(--prep-graphs-only --no-cluster)
     ;;
   cluster_only)
     PY_ARGS+=(--cluster-only)
