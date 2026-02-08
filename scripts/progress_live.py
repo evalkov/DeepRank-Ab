@@ -441,7 +441,14 @@ def aggregate_job_rows(stage_a: List[dict], stage_b: List[dict]) -> List[dict]:
             "started_at_min": row["started_at_min"] or "",
         })
 
-    out.sort(key=lambda r: (r["stage_name"], _state_order(r["state"]), r["started_at_min"], r["jobid"]))
+    def _started_ts(row: dict) -> float:
+        dt = _parse_iso(row.get("started_at_min"))
+        if dt is None:
+            return float("-inf")
+        return dt.timestamp()
+
+    # Most recently started jobs first.
+    out.sort(key=lambda r: (-_started_ts(r), _state_order(r["state"]), r["stage_name"], r["jobid"]))
     return out
 
 
