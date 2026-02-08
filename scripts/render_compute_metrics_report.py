@@ -362,17 +362,17 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     h2{margin:24px 0 10px;font-size:20px}
     h3{margin:0;font-size:17px}
     p.meta{margin:0 0 18px;color:var(--muted)}
-    .top-grid{display:grid;grid-template-columns:minmax(0,3fr) minmax(340px,2fr);gap:12px;align-items:stretch}
-    .kpis{display:grid;grid-template-columns:repeat(5,minmax(180px,1fr));gap:12px}
-    .kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
-    .kpi .label{color:var(--muted);font-size:12px}
-    .kpi .val{font-size:24px;font-weight:700;margin-top:4px}
-    .kpi .sub{font-size:12px;color:var(--muted)}
-    .util-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
-    .util-title{font-size:16px;font-weight:700;margin:0 0 6px}
-    .util-meta{font-size:12px;color:var(--muted);margin:0 0 10px}
-    .util-row{margin-top:9px}
-    .util-head{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted)}
+    .top-grid{display:flex;flex-direction:column;gap:12px}
+    .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+    .kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+    .kpi .label{color:var(--muted);font-size:11px}
+    .kpi .val{font-size:21px;font-weight:700;line-height:1.2;margin-top:3px;word-break:break-word}
+    .kpi .sub{font-size:11px;color:var(--muted);line-height:1.3}
+    .util-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+    .util-title{font-size:18px;font-weight:700;margin:0 0 4px}
+    .util-meta{font-size:11px;color:var(--muted);margin:0 0 8px;overflow-wrap:anywhere}
+    .util-row{margin-top:7px}
+    .util-head{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:var(--muted)}
     .util-head .v{color:var(--ink);font-weight:700}
     .stage-summary{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
     .chip{display:inline-block;background:var(--chip);border:1px solid #cfe0ff;border-radius:999px;padding:4px 10px;font-weight:600}
@@ -400,9 +400,8 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     thead th{background:#f7faff}
     ul.notes{margin:8px 0 0 18px;padding:0}
     .foot{margin:30px 0 10px;color:var(--muted);font-size:12px}
-    @media (max-width:1400px){.top-grid{grid-template-columns:1fr}}
-    @media (max-width:1200px){.kpis{grid-template-columns:repeat(3,minmax(180px,1fr))}.grid{grid-template-columns:repeat(3,minmax(200px,1fr))}}
-    @media (max-width:760px){.kpis{grid-template-columns:repeat(2,minmax(150px,1fr))}.grid{grid-template-columns:1fr}}
+    @media (max-width:1200px){.kpis{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}.grid{grid-template-columns:repeat(3,minmax(200px,1fr))}}
+    @media (max-width:760px){.kpis{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}.grid{grid-template-columns:1fr}}
     """
 
     parts: List[str] = []
