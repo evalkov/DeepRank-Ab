@@ -47,6 +47,7 @@ stage_b:
   cores: 32             # CPUs per task
   mem_gb: 128
   time: "04:00:00"
+  shards_per_task: 20   # Stage B array tasks = ceil(total_shards / shards_per_task)
   # ESM settings
   esm_model: esm2_t33_650M_UR50D
   esm_toks_per_batch: 12288
