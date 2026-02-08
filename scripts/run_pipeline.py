@@ -1261,7 +1261,7 @@ def main() -> int:
         print(f"\nJob chain: {' -> '.join(job_chain)}")
         print(f"\nMonitor with:")
         print(f"  squeue -u $USER")
-        print(f"  {cfg.deeprank_root}/scripts/watch_progress.sh {cfg.run_root}")
+        print(f"  python3 {cfg.deeprank_root}/scripts/progress_live.py {cfg.run_root}")
 
     # Save submission info
     if not args.dry_run and job_chain:
