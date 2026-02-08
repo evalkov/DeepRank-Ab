@@ -19,6 +19,25 @@ python scripts/run_pipeline.py my_run.yaml --dry-run
 python scripts/run_pipeline.py my_run.yaml
 ```
 
+## PDB Preflight Check (Recommended)
+
+Before large runs, validate a sample of input structures:
+
+```bash
+python scripts/check_pdb_preflight.py /path/to/input_pdbs \
+  --sample-n 50 \
+  --glob "**/*.pdb" \
+  --heavy H --light "-" --antigen T
+```
+
+This reports common blockers/warnings for DeepRank-Ab (chain mismatches, multi-model
+PDBs, backbone issues, altlocs, OXT/hydrogen prevalence, weak interfaces, etc.).
+If OXT/hydrogen problems are common, the report recommends:
+
+```bash
+scripts/cure_pdbs.sh
+```
+
 ## Dynamic Resource Allocation
 
 The pipeline **automatically sizes job arrays** based on your input data:
