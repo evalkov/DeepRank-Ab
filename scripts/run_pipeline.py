@@ -20,13 +20,14 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import yaml
@@ -68,6 +69,22 @@ class JobResult:
 
 
 @dataclass
+class InputHygieneState:
+    enabled: bool
+    mode: str
+    effective_pdb_root: Path
+    preflight_ok: bool
+    preflight_json: Optional[Path] = None
+    preflight_tsv: Optional[Path] = None
+    preflight_summary: Optional[Dict[str, Any]] = None
+    preflight_issue_counts: Dict[str, int] = field(default_factory=dict)
+    preflight_recommend_cure: bool = False
+    preflight_reasons: List[str] = field(default_factory=list)
+    cure_requested: bool = False
+    cure_job_id: Optional[str] = None
+
+
+@dataclass
 class PipelineConfig:
     """Parsed and validated pipeline configuration."""
     run_root: Path
@@ -82,6 +99,7 @@ class PipelineConfig:
     stage_a: Dict = field(default_factory=dict)
     stage_b: Dict = field(default_factory=dict)
     stage_c: Dict = field(default_factory=dict)
+    input_hygiene: Dict = field(default_factory=dict)
 
     collect_metrics: bool = True
     metrics_interval: int = 2
@@ -116,6 +134,7 @@ class PipelineConfig:
             stage_a=raw.get("stage_a", {}),
             stage_b=raw.get("stage_b", {}),
             stage_c=raw.get("stage_c", {}),
+            input_hygiene=raw.get("input_hygiene", {}),
             collect_metrics=raw.get("collect_metrics", True),
             metrics_interval=raw.get("metrics_interval", 2),
             max_concurrent_a=raw.get("max_concurrent_a", 20),
@@ -138,6 +157,22 @@ class PipelineConfig:
             script = self.deeprank_root / "scripts" / f"drab-{stage}.slurm"
             if not script.is_file():
                 errors.append(f"SLURM script not found: {script}")
+
+        # Input hygiene scripts (optional)
+        mode = str((self.input_hygiene or {}).get("mode", "off")).strip().lower()
+        valid_modes = {"off", "recommend", "required", "auto"}
+        if mode not in valid_modes:
+            errors.append(
+                f"input_hygiene.mode must be one of {sorted(valid_modes)} (got: {mode})"
+            )
+        if mode != "off":
+            checker = self.deeprank_root / "scripts" / "check_pdb_preflight.py"
+            if not checker.is_file():
+                errors.append(f"Input hygiene checker not found: {checker}")
+            if mode == "auto":
+                cure = self.deeprank_root / "scripts" / "cure_pdbs.sh"
+                if not cure.is_file():
+                    errors.append(f"Input hygiene cure script not found: {cure}")
 
         return errors
 
@@ -228,6 +263,349 @@ def count_completed_stage_b(cfg: PipelineConfig) -> int:
     if not preds_dir.is_dir():
         return 0
     return len(list(preds_dir.glob("DONE_shard_*.ok")))
+
+
+def _int_or_default(v: Any, default: int, min_value: Optional[int] = None) -> int:
+    try:
+        out = int(v)
+    except Exception:
+        out = default
+    if min_value is not None:
+        out = max(min_value, out)
+    return out
+
+
+def _float_or_default(v: Any, default: float, min_value: Optional[float] = None) -> float:
+    try:
+        out = float(v)
+    except Exception:
+        out = default
+    if min_value is not None:
+        out = max(min_value, out)
+    return out
+
+
+def _resolve_input_hygiene(cfg: PipelineConfig) -> Dict[str, Any]:
+    raw = cfg.input_hygiene or {}
+    cure_cfg = raw.get("cure", {}) if isinstance(raw.get("cure", {}), dict) else {}
+
+    mode = str(raw.get("mode", "off")).strip().lower()
+    if mode not in {"off", "recommend", "required", "auto"}:
+        mode = "off"
+
+    out_dir_raw = raw.get("cure_output_dir", "pdb_cured")
+    out_dir = Path(out_dir_raw).expanduser()
+    if not out_dir.is_absolute():
+        out_dir = (cfg.run_root / out_dir).resolve()
+
+    return {
+        "mode": mode,
+        "sample_n": _int_or_default(raw.get("sample_n", 50), 50, min_value=1),
+        "sample_mode": str(raw.get("sample_mode", "first")).strip().lower(),
+        "sample_seed": raw.get("sample_seed", None),
+        "glob": str(raw.get("glob", cfg.stage_a.get("glob", "**/*.pdb"))),
+        "auto_cure_min_fraction": _float_or_default(
+            raw.get("auto_cure_min_fraction", 0.20), 0.20, min_value=0.0
+        ),
+        "fail_on_preflight_error": bool(
+            raw.get("fail_on_preflight_error", mode in {"required", "auto"})
+        ),
+        "cure_output_dir": out_dir,
+        "cure_partition": str(cure_cfg.get("partition", "norm")),
+        "cure_cores": _int_or_default(cure_cfg.get("cores", 32), 32, min_value=1),
+        "cure_time": str(cure_cfg.get("time", "08:00:00")),
+        "cure_files_per_task": _int_or_default(
+            cure_cfg.get("files_per_task", 2000), 2000, min_value=1
+        ),
+        "cure_jobs_per_task": _int_or_default(
+            cure_cfg.get("jobs_per_task", 0), 0, min_value=0
+        ),
+        "cure_skip_existing": _int_or_default(
+            cure_cfg.get("skip_existing", 1), 1, min_value=0
+        ),
+    }
+
+
+def _parse_submitted_job_id(text: str) -> Optional[str]:
+    if not text:
+        return None
+    # sbatch default output: "Submitted batch job <id>"
+    matches = re.findall(r"Submitted batch job\s+(\d+)", text)
+    if matches:
+        return matches[-1]
+    # Fallback for parsable-like output.
+    m = re.search(r"\b(\d{5,})\b", text)
+    return m.group(1) if m else None
+
+
+def _write_input_hygiene_summary(cfg: PipelineConfig, state: InputHygieneState) -> None:
+    if not cfg.run_root.exists():
+        return
+    summary_path = cfg.run_root / "input_hygiene_summary.json"
+    obj: Dict[str, Any] = {
+        "enabled": state.enabled,
+        "mode": state.mode,
+        "effective_pdb_root": str(state.effective_pdb_root),
+        "preflight_ok": state.preflight_ok,
+        "preflight_json": str(state.preflight_json) if state.preflight_json else None,
+        "preflight_tsv": str(state.preflight_tsv) if state.preflight_tsv else None,
+        "preflight_summary": state.preflight_summary,
+        "preflight_issue_counts": state.preflight_issue_counts,
+        "preflight_recommend_cure": state.preflight_recommend_cure,
+        "preflight_reasons": state.preflight_reasons,
+        "cure_requested": state.cure_requested,
+        "cure_job_id": state.cure_job_id,
+        "written_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    with open(summary_path, "w") as f:
+        json.dump(obj, f, indent=2)
+
+
+def run_input_hygiene(
+    cfg: PipelineConfig,
+    dry_run: bool = False,
+) -> Tuple[InputHygieneState, List[JobResult]]:
+    """
+    Run optional preflight/cure integration before Stage A.
+    Returns (state, pre_stage_results). If state.preflight_ok is False and mode
+    requires hygiene, caller should abort pipeline.
+    """
+    ih = _resolve_input_hygiene(cfg)
+    mode = ih["mode"]
+    results: List[JobResult] = []
+
+    if mode == "off":
+        state = InputHygieneState(
+            enabled=False,
+            mode=mode,
+            effective_pdb_root=cfg.pdb_root,
+            preflight_ok=True,
+        )
+        return state, results
+
+    checker = cfg.deeprank_root / "scripts" / "check_pdb_preflight.py"
+    pre_json = cfg.run_root / "preflight_report_pre.json"
+    pre_tsv = cfg.run_root / "preflight_report_pre.tsv"
+
+    cmd = [
+        sys.executable,
+        str(checker),
+        str(cfg.pdb_root),
+        "--sample-n",
+        str(ih["sample_n"]),
+        "--glob",
+        ih["glob"],
+        "--sample-mode",
+        ih["sample_mode"] if ih["sample_mode"] in {"first", "random"} else "first",
+        "--heavy",
+        cfg.heavy,
+        "--light",
+        cfg.light,
+        "--antigen",
+        cfg.antigen,
+        "--json-out",
+        str(pre_json),
+        "--tsv-out",
+        str(pre_tsv),
+        "--fail-on",
+        "never",
+    ]
+    if ih["sample_seed"] is not None:
+        cmd.extend(["--seed", str(ih["sample_seed"])])
+
+    if dry_run:
+        results.append(
+            JobResult(
+                stage="PREFLIGHT",
+                job_id=None,
+                command=" ".join(cmd),
+                success=True,
+                message="[DRY RUN] would run input preflight checker",
+            )
+        )
+        state = InputHygieneState(
+            enabled=True,
+            mode=mode,
+            effective_pdb_root=cfg.pdb_root,
+            preflight_ok=True,
+            preflight_json=pre_json,
+            preflight_tsv=pre_tsv,
+        )
+        return state, results
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    preflight_ok = proc.returncode == 0 and pre_json.is_file()
+
+    pre_data: Dict[str, Any] = {}
+    pre_summary: Dict[str, Any] = {}
+    issue_counts: Dict[str, int] = {}
+    rec_cure = False
+    cure_reasons: List[str] = []
+    cure_signal_frac = 0.0
+    total_sampled = 0
+    fail_count = 0
+    warn_count = 0
+
+    if preflight_ok:
+        try:
+            pre_data = json.loads(pre_json.read_text())
+            pre_summary = dict(pre_data.get("summary", {}) or {})
+            issue_counts = {
+                str(k): int(v)
+                for k, v in dict(pre_data.get("issue_counts", {}) or {}).items()
+            }
+            recs = dict(pre_data.get("recommendations", {}) or {})
+            rec_cure = bool(recs.get("recommend_cure_pdbs", False))
+            cure_reasons = [str(x) for x in (recs.get("cure_reasons", []) or [])]
+            total_sampled = _int_or_default(pre_summary.get("total", 0), 0, min_value=0)
+            fail_count = _int_or_default(pre_summary.get("fail", 0), 0, min_value=0)
+            warn_count = _int_or_default(pre_summary.get("warn", 0), 0, min_value=0)
+            hydrogen_files = _int_or_default(
+                issue_counts.get("high_hydrogen_fraction", 0), 0, min_value=0
+            )
+            oxt_files = _int_or_default(issue_counts.get("has_oxt", 0), 0, min_value=0)
+            signal_files = max(hydrogen_files, oxt_files)
+            cure_signal_frac = signal_files / max(1, total_sampled)
+        except Exception:
+            preflight_ok = False
+
+    if preflight_ok:
+        msg = (
+            f"PASS={pre_summary.get('pass', 0)} WARN={pre_summary.get('warn', 0)} "
+            f"FAIL={pre_summary.get('fail', 0)} sample={pre_summary.get('total', 0)}"
+        )
+        results.append(
+            JobResult(
+                stage="PREFLIGHT",
+                job_id=None,
+                command=" ".join(cmd),
+                success=True,
+                message=msg,
+            )
+        )
+    else:
+        err_excerpt = (proc.stderr or proc.stdout or "").strip()
+        if len(err_excerpt) > 240:
+            err_excerpt = err_excerpt[:240] + "..."
+        results.append(
+            JobResult(
+                stage="PREFLIGHT",
+                job_id=None,
+                command=" ".join(cmd),
+                success=False,
+                message=f"checker failed (rc={proc.returncode}): {err_excerpt}",
+            )
+        )
+        should_abort = bool(ih["fail_on_preflight_error"])
+        state = InputHygieneState(
+            enabled=True,
+            mode=mode,
+            effective_pdb_root=cfg.pdb_root,
+            preflight_ok=not should_abort,
+            preflight_json=pre_json if pre_json.exists() else None,
+            preflight_tsv=pre_tsv if pre_tsv.exists() else None,
+        )
+        return state, results
+
+    # Enforce preflight failures for required mode.
+    if mode == "required" and fail_count > 0:
+        state = InputHygieneState(
+            enabled=True,
+            mode=mode,
+            effective_pdb_root=cfg.pdb_root,
+            preflight_ok=False,
+            preflight_json=pre_json,
+            preflight_tsv=pre_tsv,
+            preflight_summary=pre_summary,
+            preflight_issue_counts=issue_counts,
+            preflight_recommend_cure=rec_cure,
+            preflight_reasons=cure_reasons,
+        )
+        return state, results
+
+    # Optional auto-cure submission.
+    cure_requested = (
+        mode == "auto"
+        and rec_cure
+        and cure_signal_frac >= float(ih["auto_cure_min_fraction"])
+    )
+    cure_job_id: Optional[str] = None
+    effective_root = cfg.pdb_root
+
+    if cure_requested:
+        cure_script = cfg.deeprank_root / "scripts" / "cure_pdbs.sh"
+        cure_out = Path(ih["cure_output_dir"]).resolve()
+        cure_out.mkdir(parents=True, exist_ok=True)
+
+        cure_env = os.environ.copy()
+        cure_env["PARTITION"] = ih["cure_partition"]
+        cure_env["CPUS"] = str(ih["cure_cores"])
+        cure_env["TIME"] = ih["cure_time"]
+        cure_env["FILES_PER_TASK"] = str(ih["cure_files_per_task"])
+        cure_env["JOBS_PER_TASK"] = str(ih["cure_jobs_per_task"])
+        cure_env["SKIP_EXISTING"] = str(ih["cure_skip_existing"])
+
+        cure_cmd = [str(cure_script), str(cfg.pdb_root), str(cure_out)]
+        cure_proc = subprocess.run(cure_cmd, env=cure_env, capture_output=True, text=True)
+        parsed_job = _parse_submitted_job_id(
+            (cure_proc.stdout or "") + "\n" + (cure_proc.stderr or "")
+        )
+
+        if cure_proc.returncode == 0 and parsed_job:
+            cure_job_id = parsed_job
+            effective_root = cure_out
+            results.append(
+                JobResult(
+                    stage="CURE",
+                    job_id=parsed_job,
+                    command=" ".join(cure_cmd),
+                    success=True,
+                    message=f"Submitted cure job {parsed_job}",
+                )
+            )
+        else:
+            err_excerpt = (cure_proc.stderr or cure_proc.stdout or "").strip()
+            if len(err_excerpt) > 240:
+                err_excerpt = err_excerpt[:240] + "..."
+            results.append(
+                JobResult(
+                    stage="CURE",
+                    job_id=None,
+                    command=" ".join(cure_cmd),
+                    success=False,
+                    message=f"cure submission failed (rc={cure_proc.returncode}): {err_excerpt}",
+                )
+            )
+            state = InputHygieneState(
+                enabled=True,
+                mode=mode,
+                effective_pdb_root=cfg.pdb_root,
+                preflight_ok=False,
+                preflight_json=pre_json,
+                preflight_tsv=pre_tsv,
+                preflight_summary=pre_summary,
+                preflight_issue_counts=issue_counts,
+                preflight_recommend_cure=rec_cure,
+                preflight_reasons=cure_reasons,
+                cure_requested=True,
+            )
+            return state, results
+
+    state = InputHygieneState(
+        enabled=True,
+        mode=mode,
+        effective_pdb_root=effective_root,
+        preflight_ok=True,
+        preflight_json=pre_json,
+        preflight_tsv=pre_tsv,
+        preflight_summary=pre_summary,
+        preflight_issue_counts=issue_counts,
+        preflight_recommend_cure=rec_cure,
+        preflight_reasons=cure_reasons,
+        cure_requested=cure_requested,
+        cure_job_id=cure_job_id,
+    )
+    return state, results
 
 
 # =============================================================================
@@ -409,7 +787,12 @@ def submit_job(
         )
 
 
-def run_sharding_only(cfg: PipelineConfig, dry_run: bool = False) -> Tuple[JobResult, int]:
+def run_sharding_only(
+    cfg: PipelineConfig,
+    dry_run: bool = False,
+    dependency: Optional[str] = None,
+    env_overrides: Optional[Dict[str, str]] = None,
+) -> Tuple[JobResult, int]:
     """
     Run Stage A sharding only (task 0 with MAKE_SHARDS_ONLY=1).
     Returns (result, estimated_shards).
@@ -426,10 +809,16 @@ def run_sharding_only(cfg: PipelineConfig, dry_run: bool = False) -> Tuple[JobRe
         ), 0
 
     script = cfg.deeprank_root / "scripts" / "drab-A.slurm"
-    env = build_env(cfg, "a_shard", MAKE_SHARDS_ONLY="1")
+    env = build_env(cfg, "a_shard", MAKE_SHARDS_ONLY="1", **(env_overrides or {}))
 
     # Single-element array so SLURM_ARRAY_TASK_ID=0 is set (script requires it)
-    args = build_sbatch_args(cfg, "a_shard", array_spec="0-0", job_name="drab-A-shard")
+    args = build_sbatch_args(
+        cfg,
+        "a_shard",
+        array_spec="0-0",
+        dependency=dependency,
+        job_name="drab-A-shard",
+    )
     # Override to short time — sharding is fast
     filtered = []
     skip_next = False
@@ -555,6 +944,8 @@ def run_pipeline_dynamic(
     """
     results = []
     prev_job_id: Optional[str] = None
+    stage_a_env_overrides: Dict[str, str] = {}
+    stage_a_dependency: Optional[str] = None
 
     # Create run_root and logs directory
     if not dry_run:
@@ -573,6 +964,42 @@ def run_pipeline_dynamic(
 
     # Stage A
     if "a" in stages:
+        stage_a_dependency = prev_job_id
+
+        # Optional input hygiene phase (preflight + optional auto-cure submit).
+        hygiene_state, hygiene_results = run_input_hygiene(cfg, dry_run=dry_run)
+        results.extend(hygiene_results)
+        if not hygiene_state.preflight_ok:
+            if not dry_run:
+                _write_input_hygiene_summary(cfg, hygiene_state)
+            return results
+        if not dry_run:
+            _write_input_hygiene_summary(cfg, hygiene_state)
+        if hygiene_state.effective_pdb_root != cfg.pdb_root:
+            stage_a_env_overrides["PDB_ROOT"] = str(hygiene_state.effective_pdb_root)
+            print(f"\n  Input hygiene effective PDB root: {hygiene_state.effective_pdb_root}")
+        if hygiene_state.cure_job_id:
+            stage_a_dependency = hygiene_state.cure_job_id
+        if hygiene_state.cure_requested:
+            stage_a_env_overrides["FORCE_RESHARD"] = "1"
+            if (existing_shards > 0 or completed_a > 0 or completed_b > 0) and not dry_run:
+                results.append(
+                    JobResult(
+                        stage="INPUT-HYGIENE",
+                        job_id=None,
+                        command="",
+                        success=False,
+                        message=(
+                            "Auto-cure requested but run_root already has existing shard/pred outputs. "
+                            "Use a fresh run_root (recommended) or disable input_hygiene auto mode."
+                        ),
+                    )
+                )
+                return results
+            if existing_shards > 0:
+                print("\n  Auto-cure enabled: forcing shard list rebuild.")
+                existing_shards = 0
+
         analysis = analyze_input(cfg)
         split_mode = bool(cfg.stage_a.get("split_mode", False))
         print(f"\nInput analysis:")
@@ -588,13 +1015,18 @@ def run_pipeline_dynamic(
         else:
             # Phase 1: Create shards
             print(f"\n  Phase 1: Creating shard lists...")
-            shard_result, estimated = run_sharding_only(cfg, dry_run)
+            shard_result, estimated = run_sharding_only(
+                cfg,
+                dry_run,
+                dependency=stage_a_dependency,
+                env_overrides=stage_a_env_overrides if stage_a_env_overrides else None,
+            )
             results.append(shard_result)
 
             if not shard_result.success:
                 return results
 
-            prev_job_id = shard_result.job_id
+            stage_a_dependency = shard_result.job_id
             n_shards = estimated
 
             if not dry_run:
@@ -608,9 +1040,9 @@ def run_pipeline_dynamic(
             prep_result = run_stage_a_processing(
                 cfg,
                 n_shards,
-                dependency=prev_job_id,
+                dependency=stage_a_dependency,
                 dry_run=dry_run,
-                env_overrides={"STAGEA_PHASE": "prep_graphs"},
+                env_overrides={**stage_a_env_overrides, "STAGEA_PHASE": "prep_graphs"},
                 stage_label="A1",
             )
             results.append(prep_result)
@@ -623,7 +1055,7 @@ def run_pipeline_dynamic(
                 n_shards,
                 dependency=prep_result.job_id,
                 dry_run=dry_run,
-                env_overrides={"STAGEA_PHASE": "cluster_only"},
+                env_overrides={**stage_a_env_overrides, "STAGEA_PHASE": "cluster_only"},
                 stage_label="A2",
             )
             results.append(cluster_result)
@@ -632,7 +1064,13 @@ def run_pipeline_dynamic(
             prev_job_id = cluster_result.job_id
         else:
             print(f"\n  Phase 2: Processing {n_shards} shards...")
-            proc_result = run_stage_a_processing(cfg, n_shards, prev_job_id, dry_run)
+            proc_result = run_stage_a_processing(
+                cfg,
+                n_shards,
+                stage_a_dependency,
+                dry_run,
+                env_overrides=stage_a_env_overrides if stage_a_env_overrides else None,
+            )
             results.append(proc_result)
 
             if not proc_result.success:
@@ -740,8 +1178,10 @@ def main() -> int:
         print("Input Analysis")
         print("=" * 60)
         analysis = analyze_input(cfg)
+        ih_cfg = _resolve_input_hygiene(cfg)
         print(f"\nPDB Root: {cfg.pdb_root}")
         print(f"Glob: {analysis.glob_pattern}")
+        print(f"Input hygiene mode: {ih_cfg['mode']}")
         print(f"\n{analysis}")
 
         if analysis.estimated_shards > 0:
@@ -786,6 +1226,7 @@ def main() -> int:
     print(f"Model:     {cfg.model_path}")
     print(f"Chains:    H={cfg.heavy} L={cfg.light} Ag={cfg.antigen}")
     print(f"Stages:    {' -> '.join(s.upper() for s in stages)}")
+    print(f"Input hygiene: {_resolve_input_hygiene(cfg)['mode'].upper()}")
     print(f"Metrics:   {'ON' if cfg.collect_metrics else 'OFF'}")
     if args.dry_run:
         print(f"Mode:      DRY RUN")
@@ -825,10 +1266,14 @@ def main() -> int:
     # Save submission info
     if not args.dry_run and job_chain:
         info_file = cfg.run_root / "pipeline_jobs.json"
+        ih_cfg = _resolve_input_hygiene(cfg)
+        ih_summary_path = cfg.run_root / "input_hygiene_summary.json"
         info = {
             "config": str(args.config),
             "stages": stages,
             "jobs": {r.stage: r.job_id for r in results if r.job_id},
+            "input_hygiene_mode": ih_cfg["mode"],
+            "input_hygiene_summary": str(ih_summary_path) if ih_summary_path.exists() else None,
             "pipeline_invoked_at": pipeline_invoked_at,
             "jobs_recorded_at": datetime.now().isoformat(timespec="seconds"),
         }

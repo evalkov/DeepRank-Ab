@@ -13,6 +13,24 @@ chains:
   light: "-"      # Use "-" for VHH (no light chain)
   antigen: T
 
+# Input hygiene (optional pre-Stage-A preflight + optional auto-cure)
+input_hygiene:
+  mode: off                 # off | recommend | required | auto
+  sample_n: 50              # Number of PDBs sampled by preflight checker
+  sample_mode: first        # first | random
+  sample_seed: 42           # Used only when sample_mode=random
+  glob: "**/*.pdb"          # Optional override for preflight file discovery
+  auto_cure_min_fraction: 0.20   # auto mode trigger threshold for OXT/H prevalence
+  fail_on_preflight_error: true  # If checker crashes/missing deps: fail pipeline
+  cure_output_dir: pdb_cured     # Relative to run_root (or absolute path)
+  cure:
+    partition: norm
+    cores: 32
+    time: "08:00:00"
+    files_per_task: 2000
+    jobs_per_task: 0        # 0 => use cores
+    skip_existing: 1
+
 # Dynamic resource allocation
 # Array sizes are computed automatically based on input data
 # These control max concurrent jobs to avoid overwhelming the cluster

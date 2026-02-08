@@ -38,6 +38,22 @@ If OXT/hydrogen problems are common, the report recommends:
 scripts/cure_pdbs.sh
 ```
 
+You can also run this automatically from `run_pipeline.py` by enabling:
+
+```yaml
+input_hygiene:
+  mode: recommend   # off | recommend | required | auto
+```
+
+When enabled and Stage A is requested, the launcher writes:
+- `run_root/preflight_report_pre.json`
+- `run_root/preflight_report_pre.tsv`
+- `run_root/input_hygiene_summary.json`
+
+In `auto` mode, if OXT/hydrogen issues exceed `auto_cure_min_fraction`,
+the pipeline submits `scripts/cure_pdbs.sh`, switches Stage A input to the
+cured output directory, and chains Stage A after the cure job.
+
 ## Dynamic Resource Allocation
 
 The pipeline **automatically sizes job arrays** based on your input data:

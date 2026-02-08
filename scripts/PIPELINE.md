@@ -82,6 +82,30 @@ python scripts/run_pipeline.py pipeline.yaml --stage a
 python scripts/run_pipeline.py pipeline.yaml --analyze
 ```
 
+## Input Hygiene (Optional)
+
+`run_pipeline.py` can perform a pre-Stage-A input hygiene phase:
+
+1. Run `scripts/check_pdb_preflight.py` on a sample of input PDBs
+2. Write reports into `RUN_ROOT`:
+   - `preflight_report_pre.json`
+   - `preflight_report_pre.tsv`
+   - `input_hygiene_summary.json`
+3. Optionally submit `scripts/cure_pdbs.sh` and chain Stage A after cure
+
+Enable it in YAML:
+
+```yaml
+input_hygiene:
+  mode: recommend   # off | recommend | required | auto
+```
+
+Mode behavior:
+- `off`: skip checker/cure.
+- `recommend`: run checker, continue pipeline, record recommendations.
+- `required`: run checker and abort if sampled FAIL findings exist.
+- `auto`: run checker; if OXT/H prevalence is high, submit cure and run Stage A on cured outputs.
+
 ## Directory Structure
 
 After running, `RUN_ROOT` contains:
