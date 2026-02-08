@@ -107,8 +107,7 @@ RUN_ROOT/
 │   └── stats.json
 ├── compute_metrics/          # Raw performance metrics (CSV)
 ├── logs/                     # SLURM job logs (.log / .err)
-├── compute_metrics_summary.pdf
-├── compute_metrics_timeseries.pdf
+├── compute_metrics_report.html
 ├── compute_metrics.tsv
 ├── compute_metrics.json
 └── pipeline_jobs.json        # Job IDs from run_pipeline.py
@@ -177,10 +176,11 @@ Merges per-shard predictions and runs metrics analysis.
 | `summary/predictions_merged.h5` | Combined HDF5 with all predictions |
 | `summary/all_predictions.tsv.gz` | Tab-separated export (pdb_id, dockq) |
 | `summary/stats.json` | Summary statistics (count, mean, median, percentiles, quality bins) |
-| `compute_metrics_summary.pdf` | Single-page bar-chart of resource usage across tasks |
-| `compute_metrics_timeseries.pdf` | Multi-page time-series of CPU/GPU/memory/IO |
+| `compute_metrics_report.html` | Human-readable metrics dashboard (CPU/GPU/disk/network + findings) |
 | `compute_metrics.tsv` | Aggregate metrics table |
 | `compute_metrics.json` | Aggregate metrics (JSON) |
+
+Set `METRICS_GENERATE_PDFS=1` to additionally produce legacy PDF plots.
 
 ### Quality Bins
 

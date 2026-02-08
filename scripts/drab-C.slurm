@@ -251,12 +251,14 @@ echo "[StageC] ✓ predictions.tsv.gz -> ${RUN_ROOT}/"
 echo "[StageC] ✓ stats.json -> ${RUN_ROOT}/"
 
 # ------------------------------------------------------------
-# 4) Compute metrics: summarize, plot, copy to run root
+# 4) Compute metrics: summarize, render HTML report, copy tables
 # ------------------------------------------------------------
 METRICS_DIR="${RUN_ROOT}/compute_metrics"
 SUMMARIZE="${DEEPRANK_ROOT}/scripts/summarize_compute_metrics.py"
+REPORT_HTML_SCRIPT="${DEEPRANK_ROOT}/scripts/render_compute_metrics_report.py"
 PLOT_TS="${DEEPRANK_ROOT}/scripts/plot_compute_metrics_timeseries.py"
 PLOT_SUM="${DEEPRANK_ROOT}/scripts/plot_compute_metrics_summary.py"
+METRICS_GENERATE_PDFS="${METRICS_GENERATE_PDFS:-0}"  # 1 => also generate legacy PDFs
 
 if [[ -d "${METRICS_DIR}" ]]; then
   echo "[StageC] Running compute-metrics analysis..."
@@ -265,29 +267,43 @@ if [[ -d "${METRICS_DIR}" ]]; then
   if python3 "${SUMMARIZE}" "${METRICS_DIR}"; then
     echo "[StageC] ✓ Metrics summarized"
 
-    # Find the aggregate TSV for the summary plot
+    # Find aggregate outputs
     AGG_TSV=$(ls -1t "${METRICS_DIR}"/summary_*_ALL.tsv 2>/dev/null | head -1 || true)
+    AGG_JSON=$(ls -1t "${METRICS_DIR}"/summary_*_ALL.json 2>/dev/null | head -1 || true)
 
-    # Step 2: summary bar-chart PDF
-    if [[ -n "${AGG_TSV}" ]]; then
-      SUMMARY_PDF="${RUN_ROOT}/compute_metrics_summary.pdf"
-      if python3 "${PLOT_SUM}" "${AGG_TSV}" --out "${SUMMARY_PDF}"; then
-        echo "[StageC] ✓ Summary plot: ${SUMMARY_PDF}"
+    # Step 2: human-readable HTML report
+    if [[ -n "${AGG_JSON}" ]] && [[ -f "${REPORT_HTML_SCRIPT}" ]]; then
+      HTML_REPORT="${RUN_ROOT}/compute_metrics_report.html"
+      if python3 "${REPORT_HTML_SCRIPT}" "${AGG_JSON}" --out "${HTML_REPORT}" --run-root "${RUN_ROOT}"; then
+        echo "[StageC] ✓ HTML report: ${HTML_REPORT}"
       else
-        echo "[StageC] WARNING: summary plot failed (non-fatal)"
+        echo "[StageC] WARNING: HTML report rendering failed (non-fatal)"
+      fi
+    else
+      echo "[StageC] WARNING: aggregate metrics JSON missing; skipping HTML report"
+    fi
+
+    # Optional: legacy PDF outputs (disabled by default)
+    if [[ "${METRICS_GENERATE_PDFS}" == "1" ]]; then
+      echo "[StageC] Generating legacy PDF plots (METRICS_GENERATE_PDFS=1)..."
+      if [[ -n "${AGG_TSV}" ]]; then
+        SUMMARY_PDF="${RUN_ROOT}/compute_metrics_summary.pdf"
+        if python3 "${PLOT_SUM}" "${AGG_TSV}" --out "${SUMMARY_PDF}"; then
+          echo "[StageC] ✓ Summary plot: ${SUMMARY_PDF}"
+        else
+          echo "[StageC] WARNING: summary plot failed (non-fatal)"
+        fi
+      fi
+
+      TIMESERIES_PDF="${RUN_ROOT}/compute_metrics_timeseries.pdf"
+      if python3 "${PLOT_TS}" "${METRICS_DIR}" --out "${TIMESERIES_PDF}"; then
+        echo "[StageC] ✓ Time-series plot: ${TIMESERIES_PDF}"
+      else
+        echo "[StageC] WARNING: time-series plot failed (non-fatal)"
       fi
     fi
 
-    # Step 3: time-series PDF
-    TIMESERIES_PDF="${RUN_ROOT}/compute_metrics_timeseries.pdf"
-    if python3 "${PLOT_TS}" "${METRICS_DIR}" --out "${TIMESERIES_PDF}"; then
-      echo "[StageC] ✓ Time-series plot: ${TIMESERIES_PDF}"
-    else
-      echo "[StageC] WARNING: time-series plot failed (non-fatal)"
-    fi
-
-    # Copy aggregate tables to run root with clean names
-    AGG_JSON=$(ls -1t "${METRICS_DIR}"/summary_*_ALL.json 2>/dev/null | head -1 || true)
+    # Step 3: copy aggregate tables to run root with clean names
     if [[ -n "${AGG_TSV}" ]]; then
       cp "${AGG_TSV}" "${RUN_ROOT}/compute_metrics.tsv"
       echo "[StageC] ✓ compute_metrics.tsv"
