@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+MAX_VISIBLE_ROWS = 32
+
 
 def _read_json(path: Path) -> Optional[dict]:
     try:
@@ -502,14 +504,24 @@ def print_table(run_root: Path, stage_a: List[dict], stage_b: List[dict], rows: 
     print(hdr)
     print("-" * len(hdr))
 
-    if not rows:
+    visible = rows[:MAX_VISIBLE_ROWS]
+    hidden = rows[MAX_VISIBLE_ROWS:]
+
+    if not visible:
         print("(no active job rows yet)")
     else:
-        for r in rows:
+        for r in visible:
             print(
                 f"{r['stage_name']:<6}{r['jobid']:<16}{r['host']:<18}{r['state']:<10}"
                 f"{r['shards']:<10}{r['work'][:27]:<28}{r['now'][:19]:<20}{r['elapsed']:<10}"
             )
+        if hidden:
+            hidden_counts: Dict[str, int] = {}
+            for r in hidden:
+                key = f"{r['stage_name']}:{r['state']}"
+                hidden_counts[key] = hidden_counts.get(key, 0) + 1
+            parts = [f"{k}={v}" for k, v in sorted(hidden_counts.items(), key=lambda x: (-x[1], x[0]))]
+            print(f"... {len(hidden)} more job rows not shown ({', '.join(parts)})")
 
     print()
     print(_stage_a_totals(stage_a))
