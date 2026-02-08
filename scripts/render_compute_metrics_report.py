@@ -601,11 +601,10 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
         parts.append(f"<a class='stage-link' href='#stage-{sid}'>Stage {escape(stg)} ({len(stage_groups.get(stg, []))})</a>")
     parts.append("</div>")
 
-    for i, stg in enumerate(stage_sequence):
+    for stg in stage_sequence:
         sid = _safe_slug(stg)
         stage_reps = stage_groups.get(stg, [])
-        open_attr = " open" if i == 0 else ""
-        parts.append(f"<details class='stage-block'{open_attr}>")
+        parts.append("<details class='stage-block'>")
         parts.append(
             f"<summary id='stage-{sid}'>"
             f"<span>Stage {escape(stg)}</span>"
