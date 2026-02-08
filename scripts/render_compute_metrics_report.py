@@ -462,7 +462,6 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     th:first-child,td:first-child{text-align:left}
     th:nth-child(2),td:nth-child(2){text-align:left}
     thead th{background:#f7faff}
-    ul.notes{margin:8px 0 0 18px;padding:0}
     .foot{margin:30px 0 10px;color:var(--muted);font-size:12px}
     @media (max-width:1200px){.kpis{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}.grid{grid-template-columns:repeat(3,minmax(200px,1fr))}}
     @media (max-width:760px){.kpis{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}.grid{grid-template-columns:1fr}}
@@ -583,9 +582,6 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
             if umax is not None:
                 gpu_util_peak = max(gpu_util_peak, umax)
 
-        findings = rep.get("_findings") or _top_findings(rep, stage)
-        notes_html = "".join(f"<li>{escape(x)}</li>" for x in findings) if findings else "<li>none</li>"
-
         parts.append("<div class='prefix'>")
         parts.append("<div class='head'>")
         parts.append("<div class='badges'>")
@@ -676,9 +672,6 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
                 )
             parts.append("</tbody></table></div>")
 
-        parts.append("<div><strong>Top findings</strong><ul class='notes'>")
-        parts.append(notes_html)
-        parts.append("</ul></div>")
         parts.append("</details>")
         parts.append("</div>")
 
