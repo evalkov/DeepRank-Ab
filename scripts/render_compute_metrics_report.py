@@ -56,6 +56,24 @@ def _fmt_duration(sec: Optional[float]) -> str:
     return f"{s}s"
 
 
+def _parse_dt(x: Any) -> Optional[datetime]:
+    if not isinstance(x, str):
+        return None
+    s = x.strip()
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _fmt_dt(dt: Optional[datetime]) -> str:
+    if dt is None:
+        return "—"
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _safe_slug(s: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("_")
     return s or "unknown"
@@ -237,6 +255,10 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     disk_write_gib_total = 0.0
     net_rx_gib_total = 0.0
     net_tx_gib_total = 0.0
+    disk_total_mean_mbps: List[float] = []
+    net_total_mean_mbps: List[float] = []
+    pipeline_start: Optional[datetime] = None
+    pipeline_end: Optional[datetime] = None
 
     for rep in reports:
         prefix = str(rep.get("prefix", "unknown"))
@@ -245,6 +267,12 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
 
         dur = _as_float(rep.get("duration_s")) or 0.0
         total_duration += dur
+        rep_start = _parse_dt(rep.get("start"))
+        rep_end = _parse_dt(rep.get("end"))
+        if rep_start is not None and (pipeline_start is None or rep_start < pipeline_start):
+            pipeline_start = rep_start
+        if rep_end is not None and (pipeline_end is None or rep_end > pipeline_end):
+            pipeline_end = rep_end
 
         sys = rep.get("sys")
         logical_cpus = _infer_logical_cpus(prefix, metrics_dir)
@@ -264,6 +292,8 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
 
             dwr_mean = _as_float((sys.get("disk_w_MBps") or {}).get("mean"))
             drd_mean = _as_float((sys.get("disk_r_MBps") or {}).get("mean"))
+            if dwr_mean is not None or drd_mean is not None:
+                disk_total_mean_mbps.append((dwr_mean or 0.0) + (drd_mean or 0.0))
             dur_s = _as_float(rep.get("duration_s")) or 0.0
             if dwr_mean is not None and dur_s > 0:
                 disk_write_gib_total += (dwr_mean * dur_s) / 1024.0
@@ -272,6 +302,8 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
 
             nrx_mean = _as_float(((sys.get("net_rx_MBps") or {}) if sys.get("net_rx_MBps") else {}).get("mean"))
             ntx_mean = _as_float(((sys.get("net_tx_MBps") or {}) if sys.get("net_tx_MBps") else {}).get("mean"))
+            if nrx_mean is not None or ntx_mean is not None:
+                net_total_mean_mbps.append((nrx_mean or 0.0) + (ntx_mean or 0.0))
             if dur_s > 0:
                 if nrx_mean is not None:
                     net_rx_gib_total += (nrx_mean * dur_s) / 1024.0
@@ -308,7 +340,14 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     kpi_busy_cores_peak = max(busy_cores_peak) if busy_cores_peak else None
     kpi_gpu_slots = max(gpu_slots_per_prefix) if gpu_slots_per_prefix else 0
     kpi_gpu_active_peak = max(active_gpus_per_prefix) if active_gpus_per_prefix else 0
-    kpi_stage_mix = f"A:{stage_counts.get('A', 0)} B:{stage_counts.get('B', 0)} C:{stage_counts.get('C', 0)}"
+    kpi_disk_total_mean = sum(disk_total_mean_mbps) / len(disk_total_mean_mbps) if disk_total_mean_mbps else None
+    kpi_net_total_mean = sum(net_total_mean_mbps) / len(net_total_mean_mbps) if net_total_mean_mbps else None
+    pipeline_wall_s = None
+    if pipeline_start is not None and pipeline_end is not None and pipeline_end >= pipeline_start:
+        pipeline_wall_s = (pipeline_end - pipeline_start).total_seconds()
+    kpi_busy_core_saturation = None
+    if kpi_busy_cores_peak is not None and kpi_logical_cpus is not None and kpi_logical_cpus > 0:
+        kpi_busy_core_saturation = 100.0 * (kpi_busy_cores_peak / kpi_logical_cpus)
 
     css = """
     :root{
@@ -323,11 +362,18 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     h2{margin:24px 0 10px;font-size:20px}
     h3{margin:0;font-size:17px}
     p.meta{margin:0 0 18px;color:var(--muted)}
+    .top-grid{display:grid;grid-template-columns:minmax(0,3fr) minmax(340px,2fr);gap:12px;align-items:stretch}
     .kpis{display:grid;grid-template-columns:repeat(5,minmax(180px,1fr));gap:12px}
     .kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
     .kpi .label{color:var(--muted);font-size:12px}
     .kpi .val{font-size:24px;font-weight:700;margin-top:4px}
     .kpi .sub{font-size:12px;color:var(--muted)}
+    .util-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+    .util-title{font-size:16px;font-weight:700;margin:0 0 6px}
+    .util-meta{font-size:12px;color:var(--muted);margin:0 0 10px}
+    .util-row{margin-top:9px}
+    .util-head{display:flex;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted)}
+    .util-head .v{color:var(--ink);font-weight:700}
     .stage-summary{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
     .chip{display:inline-block;background:var(--chip);border:1px solid #cfe0ff;border-radius:999px;padding:4px 10px;font-weight:600}
     .prefix{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-top:14px}
@@ -338,7 +384,7 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     .bB{background:#ecfff3;color:#15803d;border-color:#c7f0d7}
     .bC{background:#fff7e8;color:#b45309;border-color:#f4ddaf}
     .bX{background:#f2f4f7;color:#344054;border-color:#d0d5dd}
-    .grid{display:grid;grid-template-columns:repeat(4,minmax(220px,1fr));gap:10px;margin-top:10px}
+    .grid{display:grid;grid-template-columns:repeat(5,minmax(220px,1fr));gap:10px;margin-top:10px}
     .mini{border:1px solid var(--line);border-radius:10px;padding:9px;background:#fcfdff}
     .mini .k{font-size:12px;color:var(--muted)}
     .mini .v{font-size:17px;font-weight:700;margin-top:2px}
@@ -354,7 +400,8 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     thead th{background:#f7faff}
     ul.notes{margin:8px 0 0 18px;padding:0}
     .foot{margin:30px 0 10px;color:var(--muted);font-size:12px}
-    @media (max-width:1200px){.kpis{grid-template-columns:repeat(3,minmax(180px,1fr))}.grid{grid-template-columns:repeat(2,minmax(200px,1fr))}}
+    @media (max-width:1400px){.top-grid{grid-template-columns:1fr}}
+    @media (max-width:1200px){.kpis{grid-template-columns:repeat(3,minmax(180px,1fr))}.grid{grid-template-columns:repeat(3,minmax(200px,1fr))}}
     @media (max-width:760px){.kpis{grid-template-columns:repeat(2,minmax(150px,1fr))}.grid{grid-template-columns:1fr}}
     """
 
@@ -369,10 +416,11 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
         f"Source: <code>{escape(str(src_path))}</code> | Run root: <code>{escape(run_root)}</code></p>"
     )
 
-    # KPIs
+    # Top summary and utilization snapshot
+    parts.append("<div class='top-grid'>")
     parts.append("<div class='kpis'>")
     parts.append(f"<div class='kpi'><div class='label'>Metric Prefixes</div><div class='val'>{kpi_total}</div><div class='sub'>per-task metric bundles</div></div>")
-    parts.append(f"<div class='kpi'><div class='label'>Stage Mix</div><div class='val'>{escape(kpi_stage_mix)}</div><div class='sub'>prefix count by stage</div></div>")
+    parts.append(f"<div class='kpi'><div class='label'>Pipeline Walltime</div><div class='val'>{escape(_fmt_duration(pipeline_wall_s))}</div><div class='sub'>from earliest metric start to latest metric end</div></div>")
     parts.append(f"<div class='kpi'><div class='label'>Summed Observed Walltime</div><div class='val'>{escape(_fmt_duration(total_duration))}</div><div class='sub'>sum of per-prefix durations</div></div>")
     parts.append(f"<div class='kpi'><div class='label'>CPU Capacity Observed</div><div class='val'>{escape(_fmt(kpi_logical_cpus, nd=0))}</div><div class='sub'>logical CPUs from per-core metrics</div></div>")
     parts.append(f"<div class='kpi'><div class='label'>Peak Busy CPU Cores</div><div class='val'>{escape(_fmt(kpi_busy_cores_peak, nd=2))}</div><div class='sub'>estimated from cpu_total% and per-core count</div></div>")
@@ -389,6 +437,34 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
         f"<div class='val'>TX {escape(_fmt(net_tx_gib_total, nd=2, suffix=' GiB'))} / RX {escape(_fmt(net_rx_gib_total, nd=2, suffix=' GiB'))}</div>"
         "<div class='sub'>network tx/rx volumes from mean MB/s x duration</div></div>"
     )
+    parts.append("</div>")
+    parts.append("<div class='util-card'>")
+    parts.append("<div class='util-title'>Utilization Snapshot</div>")
+    parts.append(
+        f"<div class='util-meta'>Pipeline start {escape(_fmt_dt(pipeline_start))} | "
+        f"end {escape(_fmt_dt(pipeline_end))} | wall {escape(_fmt_duration(pipeline_wall_s))}</div>"
+    )
+    parts.append(
+        "<div class='util-row'><div class='util-head'><span>CPU mean utilization</span>"
+        f"<span class='v'>{escape(_fmt_pct(kpi_cpu_mean))}</span></div>{_bar(kpi_cpu_mean, cap=100.0)}</div>"
+    )
+    parts.append(
+        "<div class='util-row'><div class='util-head'><span>CPU saturation proxy (busy/logical)</span>"
+        f"<span class='v'>{escape(_fmt_pct(kpi_busy_core_saturation))}</span></div>{_bar(kpi_busy_core_saturation, cap=100.0)}</div>"
+    )
+    parts.append(
+        "<div class='util-row'><div class='util-head'><span>GPU peak utilization</span>"
+        f"<span class='v'>{escape(_fmt_pct(kpi_gpu_peak))}</span></div>{_bar(kpi_gpu_peak, cap=100.0)}</div>"
+    )
+    parts.append(
+        "<div class='util-row'><div class='util-head'><span>Disk throughput mean (R+W)</span>"
+        f"<span class='v'>{escape(_fmt(kpi_disk_total_mean, nd=2, suffix=' MB/s'))}</span></div>{_bar(kpi_disk_total_mean, cap=250.0)}</div>"
+    )
+    parts.append(
+        "<div class='util-row'><div class='util-head'><span>Network throughput mean (TX+RX)</span>"
+        f"<span class='v'>{escape(_fmt(kpi_net_total_mean, nd=2, suffix=' MB/s'))}</span></div>{_bar(kpi_net_total_mean, cap=25.0)}</div>"
+    )
+    parts.append("</div>")
     parts.append("</div>")
 
     parts.append("<div class='stage-summary'>")
@@ -452,11 +528,12 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
             f"<div class='v'>{escape(_fmt(busy_cores_mean))} / {escape(_fmt(busy_cores_p95))}</div>"
             f"{_bar(busy_cores_p95, cap=max(1.0, logical_cpus or 1.0))}</div>"
         )
-        parts.append(
-            "<div class='mini'><div class='k'>GPU active / peak util</div>"
-            f"<div class='v'>{active_gpu_count} / {escape(_fmt_pct(gpu_util_peak))}</div>"
-            f"{_bar(gpu_util_peak, cap=100.0)}</div>"
-        )
+        if stage != "A":
+            parts.append(
+                "<div class='mini'><div class='k'>GPU active / peak util</div>"
+                f"<div class='v'>{active_gpu_count} / {escape(_fmt_pct(gpu_util_peak))}</div>"
+                f"{_bar(gpu_util_peak, cap=100.0)}</div>"
+            )
         parts.append(
             "<div class='mini'><div class='k'>Disk write p95</div>"
             f"<div class='v'>{escape(_fmt(disk_w_p95, nd=2, suffix=' MB/s'))}</div>"
