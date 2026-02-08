@@ -398,15 +398,6 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
             str(r["_meta"].get("host", "")),
         )
     )
-    stage_groups: Dict[str, List[Dict[str, Any]]] = {}
-    for rep in normalized:
-        stg = str((rep.get("_meta") or {}).get("stage", "UNKNOWN"))
-        if stg not in stage_groups:
-            stage_groups[stg] = []
-        stage_groups[stg].append(rep)
-    preferred_stage_order = ["A", "B", "C"]
-    stage_sequence = [s for s in preferred_stage_order if s in stage_groups]
-    stage_sequence.extend(sorted([s for s in stage_groups.keys() if s not in preferred_stage_order]))
 
     kpi_total = len(normalized)
     kpi_cpu_mean = sum(cpu_means) / len(cpu_means) if cpu_means else None
@@ -592,141 +583,136 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     parts.append("</div>")
     parts.append("</div>")
 
-    for stg in stage_sequence:
-        sid = _safe_slug(stg)
-        stage_reps = stage_groups.get(stg, [])
-        parts.append("<details class='stage-block'>")
+    parts.append("<details class='stage-block'>")
+    parts.append(
+        f"<summary id='jobs'>"
+        "<span>Jobs</span>"
+        f"<span class='stage-meta'>{kpi_total} panels</span>"
+        "</summary>"
+    )
+
+    for rep in normalized:
+        meta = rep.get("_meta", {})
+        stage = meta.get("stage", "UNKNOWN")
+        job = meta.get("job", "—")
+        task = meta.get("task", "—")
+        host = meta.get("host", "—")
+        logical_cpus = _as_float(meta.get("logical_cpus"))
+
+        sys = rep.get("sys")
+        gpus = rep.get("gpus") or []
+        proc = rep.get("proc")
+
+        cpu_mean = _as_float(((sys or {}).get("cpu_total") or {}).get("mean"))
+        cpu_p95 = _as_float(((sys or {}).get("cpu_total") or {}).get("p95"))
+        busy_cores_mean = None if (cpu_mean is None or logical_cpus is None) else (cpu_mean / 100.0) * logical_cpus
+        busy_cores_p95 = None if (cpu_p95 is None or logical_cpus is None) else (cpu_p95 / 100.0) * logical_cpus
+        mem_max = _as_float(((sys or {}).get("mem_used_mib") or {}).get("max"))
+        disk_w_p95 = _as_float(((sys or {}).get("disk_w_MBps") or {}).get("p95"))
+        net_tx_p95 = _as_float((((sys or {}).get("net_tx_MBps") or {}) if sys and (sys.get("net_tx_MBps") is not None) else {}).get("p95"))
+
+        gpu_util_peak = 0.0
+        active_gpu_count = 0
+        for g in gpus:
+            if bool(g.get("active")):
+                active_gpu_count += 1
+            umax = _as_float((g.get("util") or {}).get("max"))
+            if umax is not None:
+                gpu_util_peak = max(gpu_util_peak, umax)
+
+        parts.append("<div class='prefix'>")
+        parts.append("<div class='head'>")
+        parts.append("<div class='badges'>")
+        parts.append(f"<span class='badge bX'>Job {escape(str(job))}_{escape(str(task))}</span>")
+        parts.append(f"<span class='badge bX'>{escape(str(host))}</span>")
+        parts.append(f"<span class='badge bX'>Duration {escape(_fmt_duration(_as_float(rep.get('duration_s'))))}</span>")
+        parts.append("</div></div>")
+
+        parts.append("<div class='grid'>")
         parts.append(
-            f"<summary id='stage-{sid}'>"
-            f"<span>Stage {escape(stg)}</span>"
-            f"<span class='stage-meta'>{len(stage_reps)} panels</span>"
-            "</summary>"
+            "<div class='mini'><div class='k'>CPU total mean / p95</div>"
+            f"<div class='v'>{escape(_fmt_pct(cpu_mean))} / {escape(_fmt_pct(cpu_p95))}</div>"
+            f"{_bar(cpu_mean, cap=100.0)}</div>"
         )
-
-        for rep in stage_reps:
-            meta = rep.get("_meta", {})
-            stage = meta.get("stage", "UNKNOWN")
-            job = meta.get("job", "—")
-            task = meta.get("task", "—")
-            host = meta.get("host", "—")
-            logical_cpus = _as_float(meta.get("logical_cpus"))
-            badge_cls = "bA" if stage == "A" else ("bB" if stage == "B" else ("bC" if stage == "C" else "bX"))
-
-            sys = rep.get("sys")
-            gpus = rep.get("gpus") or []
-            proc = rep.get("proc")
-
-            cpu_mean = _as_float(((sys or {}).get("cpu_total") or {}).get("mean"))
-            cpu_p95 = _as_float(((sys or {}).get("cpu_total") or {}).get("p95"))
-            busy_cores_mean = None if (cpu_mean is None or logical_cpus is None) else (cpu_mean / 100.0) * logical_cpus
-            busy_cores_p95 = None if (cpu_p95 is None or logical_cpus is None) else (cpu_p95 / 100.0) * logical_cpus
-            mem_max = _as_float(((sys or {}).get("mem_used_mib") or {}).get("max"))
-            disk_w_p95 = _as_float(((sys or {}).get("disk_w_MBps") or {}).get("p95"))
-            net_tx_p95 = _as_float((((sys or {}).get("net_tx_MBps") or {}) if sys and (sys.get("net_tx_MBps") is not None) else {}).get("p95"))
-
-            gpu_util_peak = 0.0
-            active_gpu_count = 0
-            for g in gpus:
-                if bool(g.get("active")):
-                    active_gpu_count += 1
-                umax = _as_float((g.get("util") or {}).get("max"))
-                if umax is not None:
-                    gpu_util_peak = max(gpu_util_peak, umax)
-
-            parts.append("<div class='prefix'>")
-            parts.append("<div class='head'>")
-            parts.append("<div class='badges'>")
-            parts.append(f"<span class='badge {badge_cls}'>Stage {escape(stage)}</span>")
-            parts.append(f"<span class='badge bX'>Job {escape(str(job))}_{escape(str(task))}</span>")
-            parts.append(f"<span class='badge bX'>{escape(str(host))}</span>")
-            parts.append(f"<span class='badge bX'>Duration {escape(_fmt_duration(_as_float(rep.get('duration_s'))))}</span>")
-            parts.append("</div></div>")
-
-            parts.append("<div class='grid'>")
+        parts.append(
+            "<div class='mini'><div class='k'>Busy cores est (mean / p95)</div>"
+            f"<div class='v'>{escape(_fmt(busy_cores_mean))} / {escape(_fmt(busy_cores_p95))}</div>"
+            f"{_bar(busy_cores_p95, cap=max(1.0, logical_cpus or 1.0))}</div>"
+        )
+        if stage != "A":
             parts.append(
-                "<div class='mini'><div class='k'>CPU total mean / p95</div>"
-                f"<div class='v'>{escape(_fmt_pct(cpu_mean))} / {escape(_fmt_pct(cpu_p95))}</div>"
-                f"{_bar(cpu_mean, cap=100.0)}</div>"
+                "<div class='mini'><div class='k'>GPU active / peak util</div>"
+                f"<div class='v'>{active_gpu_count} / {escape(_fmt_pct(gpu_util_peak))}</div>"
+                f"{_bar(gpu_util_peak, cap=100.0)}</div>"
             )
-            parts.append(
-                "<div class='mini'><div class='k'>Busy cores est (mean / p95)</div>"
-                f"<div class='v'>{escape(_fmt(busy_cores_mean))} / {escape(_fmt(busy_cores_p95))}</div>"
-                f"{_bar(busy_cores_p95, cap=max(1.0, logical_cpus or 1.0))}</div>"
-            )
-            if stage != "A":
+        parts.append(
+            "<div class='mini'><div class='k'>Disk write p95</div>"
+            f"<div class='v'>{escape(_fmt(disk_w_p95, nd=2, suffix=' MB/s'))}</div>"
+            f"{_bar(disk_w_p95, cap=max(50.0, (disk_w_p95 or 0.0) * 1.2))}</div>"
+        )
+        parts.append(
+            "<div class='mini'><div class='k'>Net tx p95 / Mem used max</div>"
+            f"<div class='v'>{escape(_fmt(net_tx_p95, nd=2, suffix=' MB/s'))} / {escape(_fmt_bytes_mib_to_gib(mem_max))}</div>"
+            f"{_bar(net_tx_p95, cap=max(10.0, (net_tx_p95 or 0.0) * 1.2))}</div>"
+        )
+        parts.append("</div>")
+
+        parts.append("<details><summary>Full metrics (CPU, GPU, disk, network, process)</summary>")
+        parts.append("<div class='table-wrap'><table><thead><tr>")
+        parts.append(
+            "<th>Metric</th><th>Unit</th><th>N</th><th>Mean</th><th>Median</th><th>P95</th><th>Max</th><th>Min</th><th>Std</th>"
+            "<th>Frac&gt;0</th><th>Frac&gt;=10</th><th>Frac&gt;=50</th><th>Frac&gt;=80</th>"
+        )
+        parts.append("</tr></thead><tbody>")
+
+        if sys:
+            parts.append(_series_row("cpu_total", "%", (sys.get("cpu_total") or None)))
+            parts.append(_series_row("cpu_iowait", "%", (sys.get("cpu_iowait") or None)))
+            parts.append(_series_row("load1", "load", (sys.get("load1") or None)))
+            parts.append(_series_row("mem_used", "MiB", (sys.get("mem_used_mib") or None)))
+            parts.append(_series_row("mem_avail", "MiB", (sys.get("mem_avail_mib") or None)))
+            parts.append(_series_row("disk_read", "MB/s", (sys.get("disk_r_MBps") or None)))
+            parts.append(_series_row("disk_write", "MB/s", (sys.get("disk_w_MBps") or None)))
+            parts.append(_series_row("disk_read_iops", "IOPS", (sys.get("disk_r_iops") or None)))
+            parts.append(_series_row("disk_write_iops", "IOPS", (sys.get("disk_w_iops") or None)))
+            parts.append(_series_row("net_rx", "MB/s", (sys.get("net_rx_MBps") or None)))
+            parts.append(_series_row("net_tx", "MB/s", (sys.get("net_tx_MBps") or None)))
+
+        if proc:
+            parts.append(_series_row("proc_cpu", "%", (proc.get("proc_cpu") or None)))
+            parts.append(_series_row("proc_rss", "MiB", (proc.get("rss_mib") or None)))
+            parts.append(_series_row("proc_vms", "MiB", (proc.get("vms_mib") or None)))
+            parts.append(_series_row("proc_nprocs", "count", (proc.get("nprocs") or None)))
+
+        for g in gpus:
+            gidx = g.get("gpu")
+            parts.append(_series_row(f"gpu{gidx}_util", "%", (g.get("util") or None)))
+            parts.append(_series_row(f"gpu{gidx}_mem_used", "MiB", (g.get("mem_mib") or None)))
+            parts.append(_series_row(f"gpu{gidx}_power", "W", (g.get("power_w") or None)))
+            parts.append(_series_row(f"gpu{gidx}_temp", "C", (g.get("temp_c") or None)))
+            parts.append(_series_row(f"gpu{gidx}_clock_sm", "MHz", (g.get("clk_sm_mhz") or None)))
+
+        parts.append("</tbody></table></div>")
+
+        pmon = rep.get("pmon")
+        if pmon:
+            parts.append("<div class='table-wrap'><table><thead><tr><th>PMON GPU</th><th>SM mean</th><th>SM max</th><th>Frac SM&gt;0</th><th>Unique PIDs</th></tr></thead><tbody>")
+            for p in pmon:
                 parts.append(
-                    "<div class='mini'><div class='k'>GPU active / peak util</div>"
-                    f"<div class='v'>{active_gpu_count} / {escape(_fmt_pct(gpu_util_peak))}</div>"
-                    f"{_bar(gpu_util_peak, cap=100.0)}</div>"
+                    "<tr>"
+                    f"<td>GPU{escape(str(p.get('gpu')))}</td>"
+                    f"<td>{escape(_fmt(_as_float(p.get('sm_mean'))))}%</td>"
+                    f"<td>{escape(_fmt(_as_float(p.get('sm_max'))))}%</td>"
+                    f"<td>{escape(_fmt_pct(None if _as_float(p.get('frac_sm_gt0')) is None else 100.0 * _as_float(p.get('frac_sm_gt0'))))}</td>"
+                    f"<td>{escape(_fmt(_as_float(p.get('unique_pids')), nd=0))}</td>"
+                    "</tr>"
                 )
-            parts.append(
-                "<div class='mini'><div class='k'>Disk write p95</div>"
-                f"<div class='v'>{escape(_fmt(disk_w_p95, nd=2, suffix=' MB/s'))}</div>"
-                f"{_bar(disk_w_p95, cap=max(50.0, (disk_w_p95 or 0.0) * 1.2))}</div>"
-            )
-            parts.append(
-                "<div class='mini'><div class='k'>Net tx p95 / Mem used max</div>"
-                f"<div class='v'>{escape(_fmt(net_tx_p95, nd=2, suffix=' MB/s'))} / {escape(_fmt_bytes_mib_to_gib(mem_max))}</div>"
-                f"{_bar(net_tx_p95, cap=max(10.0, (net_tx_p95 or 0.0) * 1.2))}</div>"
-            )
-            parts.append("</div>")
-
-            parts.append("<details><summary>Full metrics (CPU, GPU, disk, network, process)</summary>")
-            parts.append("<div class='table-wrap'><table><thead><tr>")
-            parts.append(
-                "<th>Metric</th><th>Unit</th><th>N</th><th>Mean</th><th>Median</th><th>P95</th><th>Max</th><th>Min</th><th>Std</th>"
-                "<th>Frac&gt;0</th><th>Frac&gt;=10</th><th>Frac&gt;=50</th><th>Frac&gt;=80</th>"
-            )
-            parts.append("</tr></thead><tbody>")
-
-            if sys:
-                parts.append(_series_row("cpu_total", "%", (sys.get("cpu_total") or None)))
-                parts.append(_series_row("cpu_iowait", "%", (sys.get("cpu_iowait") or None)))
-                parts.append(_series_row("load1", "load", (sys.get("load1") or None)))
-                parts.append(_series_row("mem_used", "MiB", (sys.get("mem_used_mib") or None)))
-                parts.append(_series_row("mem_avail", "MiB", (sys.get("mem_avail_mib") or None)))
-                parts.append(_series_row("disk_read", "MB/s", (sys.get("disk_r_MBps") or None)))
-                parts.append(_series_row("disk_write", "MB/s", (sys.get("disk_w_MBps") or None)))
-                parts.append(_series_row("disk_read_iops", "IOPS", (sys.get("disk_r_iops") or None)))
-                parts.append(_series_row("disk_write_iops", "IOPS", (sys.get("disk_w_iops") or None)))
-                parts.append(_series_row("net_rx", "MB/s", (sys.get("net_rx_MBps") or None)))
-                parts.append(_series_row("net_tx", "MB/s", (sys.get("net_tx_MBps") or None)))
-
-            if proc:
-                parts.append(_series_row("proc_cpu", "%", (proc.get("proc_cpu") or None)))
-                parts.append(_series_row("proc_rss", "MiB", (proc.get("rss_mib") or None)))
-                parts.append(_series_row("proc_vms", "MiB", (proc.get("vms_mib") or None)))
-                parts.append(_series_row("proc_nprocs", "count", (proc.get("nprocs") or None)))
-
-            for g in gpus:
-                gidx = g.get("gpu")
-                parts.append(_series_row(f"gpu{gidx}_util", "%", (g.get("util") or None)))
-                parts.append(_series_row(f"gpu{gidx}_mem_used", "MiB", (g.get("mem_mib") or None)))
-                parts.append(_series_row(f"gpu{gidx}_power", "W", (g.get("power_w") or None)))
-                parts.append(_series_row(f"gpu{gidx}_temp", "C", (g.get("temp_c") or None)))
-                parts.append(_series_row(f"gpu{gidx}_clock_sm", "MHz", (g.get("clk_sm_mhz") or None)))
-
             parts.append("</tbody></table></div>")
 
-            pmon = rep.get("pmon")
-            if pmon:
-                parts.append("<div class='table-wrap'><table><thead><tr><th>PMON GPU</th><th>SM mean</th><th>SM max</th><th>Frac SM&gt;0</th><th>Unique PIDs</th></tr></thead><tbody>")
-                for p in pmon:
-                    parts.append(
-                        "<tr>"
-                        f"<td>GPU{escape(str(p.get('gpu')))}</td>"
-                        f"<td>{escape(_fmt(_as_float(p.get('sm_mean'))))}%</td>"
-                        f"<td>{escape(_fmt(_as_float(p.get('sm_max'))))}%</td>"
-                        f"<td>{escape(_fmt_pct(None if _as_float(p.get('frac_sm_gt0')) is None else 100.0 * _as_float(p.get('frac_sm_gt0'))))}</td>"
-                        f"<td>{escape(_fmt(_as_float(p.get('unique_pids')), nd=0))}</td>"
-                        "</tr>"
-                    )
-                parts.append("</tbody></table></div>")
-
-            parts.append("</details>")
-            parts.append("</div>")
-
         parts.append("</details>")
+        parts.append("</div>")
+
+    parts.append("</details>")
 
     parts.append(
         "<div class='foot'>"
