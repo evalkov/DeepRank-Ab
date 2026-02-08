@@ -476,9 +476,6 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     .util-row{margin-top:7px}
     .util-head{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:var(--muted)}
     .util-head .v{color:var(--ink);font-weight:700}
-    .stage-nav{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-    .stage-link{display:inline-block;background:var(--chip);border:1px solid #cfe0ff;border-radius:999px;padding:5px 11px;font-weight:700;font-size:12px;color:#1d4ed8;text-decoration:none}
-    .stage-link:hover{background:#e4edff}
     .stage-block{margin-top:14px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 12px}
     .stage-block[open]{padding-bottom:12px}
     .stage-block>summary{list-style:none;cursor:pointer;color:var(--ink);font-weight:700;display:flex;justify-content:space-between;align-items:center;padding:4px 0}
@@ -593,12 +590,6 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
         f"<span class='v'>{escape(_fmt_pct(kpi_idle_overhead_pct))}</span></div>{_bar(kpi_idle_overhead_pct, cap=100.0)}</div>"
     )
     parts.append("</div>")
-    parts.append("</div>")
-
-    parts.append("<div class='stage-nav'>")
-    for stg in stage_sequence:
-        sid = _safe_slug(stg)
-        parts.append(f"<a class='stage-link' href='#stage-{sid}'>Stage {escape(stg)} ({len(stage_groups.get(stg, []))})</a>")
     parts.append("</div>")
 
     for stg in stage_sequence:
