@@ -74,6 +74,18 @@ def _fmt_dt(dt: Optional[datetime]) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _as_int_or_none(x: Any) -> Optional[int]:
+    try:
+        if x is None:
+            return None
+        s = str(x).strip()
+        if not s:
+            return None
+        return int(s)
+    except Exception:
+        return None
+
+
 def _safe_slug(s: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "_", s).strip("_")
     return s or "unknown"
@@ -360,17 +372,32 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
         if findings:
             bottleneck_prefixes += 1
 
+        job_num = _as_int_or_none(job)
+        task_num = _as_int_or_none(task)
         rep["_meta"] = {
             "stage": stage,
             "job": job,
             "task": task,
             "host": host,
             "logical_cpus": logical_cpus,
+            "job_num": job_num,
+            "task_num": task_num,
         }
         rep["_findings"] = findings
         normalized.append(rep)
 
-    normalized.sort(key=lambda r: (r["_meta"]["stage"], r["_meta"]["job"], r["_meta"]["task"]))
+    normalized.sort(
+        key=lambda r: (
+            r["_meta"]["stage"],
+            r["_meta"].get("job_num") is None,
+            r["_meta"].get("job_num") if r["_meta"].get("job_num") is not None else 10**18,
+            str(r["_meta"].get("job", "")),
+            r["_meta"].get("task_num") is None,
+            r["_meta"].get("task_num") if r["_meta"].get("task_num") is not None else 10**18,
+            str(r["_meta"].get("task", "")),
+            str(r["_meta"].get("host", "")),
+        )
+    )
 
     kpi_total = len(normalized)
     kpi_cpu_mean = sum(cpu_means) / len(cpu_means) if cpu_means else None
