@@ -60,61 +60,58 @@ https://github.com/oxpig/ANARCI/issues/102
 
 ## 🔧 Usage
 
-The inference pipeline is executed through:
+The production SLURM pipeline is executed through:
 
-    DeepRank-Ab/scripts/inference.py
+    DeepRank-Ab/scripts/run_pipeline.py
 
 ### **Run the pipeline**
 
 ``` bash
-python3 scripts/inference.py <pdb_file> <antibody_heavy_chain_id> <antibody_light_chain_id> <antigen_chain_id>
+cp scripts/pipeline.yaml.example my_run.yaml
+python3 scripts/run_pipeline.py my_run.yaml --analyze
+python3 scripts/run_pipeline.py my_run.yaml
 ```
 
 ### **Example**
 
 ``` bash
-python3 scripts/inference.py example/test.pdb H L A
+python3 scripts/progress_live.py /path/to/run_root
 ```
 
 This will:
 
--   Create a workspace
--   Generate ESM embeddings
--   Annotate CDRs
--   Build atom-level graphs
--   Cluster nodes
--   Predict DockQ scores
--   Save output files (`.csv` and `.hdf5`)
+-   Run Stage A (graph generation + clustering)
+-   Run Stage B (ESM + inference)
+-   Run Stage C (merge/export/metrics report)
+-   Save outputs under your configured `run_root`
 
 ------------------------------------------------------------------------
 
 ## 🧬 Input Requirements
 
--   **PDB file**\
-    Antibody--antigen structure. Can be a single model or an ensemble.
+-   **PDB directory**\
+    Folder with antibody-antigen PDBs (`glob` configurable in YAML).
 
--   **Heavy chain ID**\
-    Example: `H`
+-   **Chain IDs**\
+    `heavy`, `light` (or `-`), and `antigen` set in YAML.
 
--   **Light chain ID**\
-    Example: `L`
+-   **Model weights path**\
+    `model_path` in YAML.
 
--   **Antigen chain ID**\
-    Example: `A`
+-   **SLURM resources**\
+    Defined per stage in YAML.
 
 ------------------------------------------------------------------------
 
 
 ## ⚙️ Large-Scale Inference
 
-We provide a helper script for running DeepRank-Ab on **large batches**
-of complexes. Adapt it to your dataset as needed. 
+Use `scripts/run_pipeline.py` for large-scale jobs.
 
-Example:
-
-``` bash
-python3 scripts/run_batch_inference.sh
-```
+Legacy single-file and older batch helpers are now in:
+- `scripts/deprecated/inference.py`
+- `scripts/deprecated/large_scale_infer_vhh.py`
+- `scripts/deprecated/large_scale_infer_vhh_esm_opt.py`
 
 ------------------------------------------------------------------------
 

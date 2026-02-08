@@ -211,15 +211,12 @@ squeue -u $USER
 ### Watch Pipeline Progress
 
 ```bash
-# Stage A progress
-./scripts/stageA_progress.sh /path/to/run_root
-
-# Stage B progress
-./scripts/stageB_progress.sh /path/to/run_root
-
-# Combined watcher
-./scripts/watch_progress.sh /path/to/run_root
+# Unified live tracker (Stage A + B rows, Stage C status line)
+python3 ./scripts/progress_live.py /path/to/run_root
 ```
+
+Legacy stage-specific watchers were moved to:
+`scripts/deprecated/`
 
 ### View Logs
 

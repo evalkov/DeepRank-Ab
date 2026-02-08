@@ -628,8 +628,7 @@ def print_table(run_root: Path, stage_a: List[dict], stage_b: List[dict], rows: 
 
 def usage() -> None:
     print("Usage: python3 scripts/progress_live.py RUN_ROOT", file=sys.stderr)
-    print("   or: scripts/stageA_progress_live.py RUN_ROOT", file=sys.stderr)
-    print("   or: scripts/stageB_progress_live.py RUN_ROOT", file=sys.stderr)
+    print("Legacy wrappers moved to: scripts/deprecated/", file=sys.stderr)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

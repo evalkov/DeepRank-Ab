@@ -49,9 +49,8 @@ Three-stage pipeline for large-scale antibody-antigen binding affinity predictio
 
   MONITORING (user-facing, run in parallel)
   ------------------------------------------
-  watch_progress.sh --stage A --> stageA_progress.sh
-  watch_progress.sh --stage B --> stageB_progress.sh
-  stageA_timing_breakdown.sh
+  progress_live.py RUN_ROOT
+  (legacy monitors are in scripts/deprecated/)
 ```
 
 ## Overview
@@ -218,56 +217,23 @@ Set `METRICS_GENERATE_PDFS=1` to additionally produce legacy PDF plots.
 
 # Progress Monitoring
 
-## stageA_progress.sh
-
-Monitor Stage A shard processing.
+Use the unified live tracker:
 
 ```bash
-# One-shot status
-scripts/stageA_progress.sh --run-root /path/to/run
-
-# With Slurm job info
-scripts/stageA_progress.sh --run-root /path/to/run --job 12345678
-
-# Live watch mode
-scripts/stageA_progress.sh --run-root /path/to/run --job 12345678 --watch 5
+python3 scripts/progress_live.py /path/to/run
 ```
 
-### Options
+Behavior:
+- Refreshes every 5 seconds
+- Shows Stage A + Stage B as job-level rows
+- Shows Stage C phase/status as a concise line
+- Shows final pipeline start/end/walltime when complete
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--run-root` | (required) | Path to RUN_ROOT |
-| `--job` | | Slurm array job ID for status summary |
-| `--watch N` | | Refresh every N seconds |
-| `--top N` | `10` | Show N most recent completions |
-| `--rate-n N` | `20` | Use last N completions for ETA |
-| `--no-slurm` | | Disable Slurm queries |
-
-## stageB_progress.sh
-
-Monitor Stage B GPU inference. Same options as `stageA_progress.sh`.
-
-```bash
-scripts/stageB_progress.sh --run-root /path/to/run --job 12345678 --watch 5
-```
-
-## watch_progress.sh
-
-Generic wrapper for live monitoring.
-
-```bash
-scripts/watch_progress.sh --run-root /path/to/run --stage A --job 12345678
-scripts/watch_progress.sh --run-root /path/to/run --stage B --job 12345678
-```
-
-## stageA_timing_breakdown.sh
-
-Aggregate timing statistics from completed shards.
-
-```bash
-scripts/stageA_timing_breakdown.sh /path/to/run
-```
+Legacy monitors are preserved under `scripts/deprecated/`:
+- `scripts/deprecated/watch_progress.sh`
+- `scripts/deprecated/stageA_progress.sh`
+- `scripts/deprecated/stageB_progress.sh`
+- `scripts/deprecated/stageA_timing_breakdown.sh`
 
 ---
 
@@ -285,8 +251,9 @@ Both Stage A and Stage B collect optional performance metrics via
 
 Metrics are saved to `RUN_ROOT/compute_metrics/`.
 
-Stage C automatically runs the analysis scripts and places output PDFs and
-tables in `RUN_ROOT/`.
+Stage C automatically runs the analysis scripts and places an HTML report and
+aggregate tables in `RUN_ROOT/` (optional legacy PDFs via
+`METRICS_GENERATE_PDFS=1`).
 
 ### Manual Analysis
 

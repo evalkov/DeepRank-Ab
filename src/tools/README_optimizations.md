@@ -283,7 +283,7 @@ seqAg = _chain_sequence_from_model(model_in, antigen_chain_id)
 
 ## 8. Embedding File Caching
 
-**File:** `scripts/inference.py`
+**File:** `scripts/deprecated/inference.py`
 
 **Problem:** `add_embedding()` loaded the same `.pt` file repeatedly for each residue in the same chain.
 
