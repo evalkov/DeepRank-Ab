@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from collections import Counter
@@ -123,6 +124,92 @@ def _find_stage_c_done_time(run_root: Path) -> Tuple[Optional[Path], Optional[da
 
     done_hits.sort(key=lambda x: x[0], reverse=True)
     return done_hits[0][1], done_hits[0][0]
+
+
+def _resolve_stage_c_log(run_root: Path) -> Tuple[Optional[Path], Optional[str]]:
+    """Return the best Stage C log path and configured C job id (if known)."""
+    logs_dir = run_root / "logs"
+    if not logs_dir.is_dir():
+        return None, None
+
+    pipeline_jobs = _read_json(run_root / "pipeline_jobs.json") or {}
+    jobs = pipeline_jobs.get("jobs", {}) if isinstance(pipeline_jobs, dict) else {}
+    c_jobid = str(jobs.get("C", "")).strip() if isinstance(jobs, dict) else ""
+
+    candidates: List[Path] = []
+    if c_jobid:
+        p = logs_dir / f"drab-C_{c_jobid}.log"
+        if p.exists():
+            candidates.append(p)
+    candidates.extend(sorted(logs_dir.glob("drab-C_*.log")))
+
+    if not candidates:
+        return None, c_jobid or None
+
+    # Prefer newest by mtime.
+    candidates = sorted(set(candidates), key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+    return candidates[0], c_jobid or None
+
+
+def _collect_stage_c_status(run_root: Path) -> str:
+    """Build a concise, phase-oriented Stage C status summary from logs."""
+    log_path, c_jobid = _resolve_stage_c_log(run_root)
+
+    if log_path is None:
+        if c_jobid:
+            return f"Stage C: pending | job={c_jobid} (log not created yet)"
+        return "Stage C: pending | no Stage C log yet"
+
+    try:
+        lines = [ln.strip() for ln in log_path.read_text(errors="ignore").splitlines() if ln.strip()]
+    except OSError:
+        return f"Stage C: unknown | unable to read {log_path.name}"
+
+    if not lines:
+        return f"Stage C: pending | {log_path.name} is empty"
+
+    last_line = lines[-1]
+    stage_lines = [ln for ln in lines if "[StageC]" in ln or ln.startswith("✓")]
+
+    def _last_match(pattern: str) -> Optional[str]:
+        for ln in reversed(stage_lines):
+            if re.search(pattern, ln):
+                return ln
+        return None
+
+    # Error takes precedence.
+    err = _last_match(r"\[StageC\].*ERROR|^ERROR:")
+    if err:
+        return f"Stage C: failed | {err}"
+
+    if _last_match(r"\[StageC\] Done\."):
+        return f"Stage C: done | {log_path.name}"
+
+    post = _last_match(r"compute-metrics|Metrics summarized|Summary plot|Time-series plot|compute_metrics\.(tsv|json)")
+    if post:
+        return f"Stage C: postprocessing | {post}"
+
+    copy_ln = _last_match(r"predictions\.tsv\.gz ->|stats\.json ->")
+    if copy_ln:
+        return f"Stage C: copying outputs | {copy_ln}"
+
+    export_ln = _last_match(r"✓ Wrote:|✓ Stats:")
+    if export_ln:
+        return f"Stage C: exporting | {export_ln}"
+
+    merge_ln = _last_match(r"Merging ->|DONE shards:")
+    if merge_ln:
+        return f"Stage C: merging shard predictions | {merge_ln}"
+
+    validate_ln = _last_match(r"Waiting for .* shards| done, .* failed, .* pending|All .* shards succeeded")
+    if validate_ln:
+        return f"Stage C: validating shard completion | {validate_ln}"
+
+    run_root_ln = _last_match(r"\[StageC\] RUN_ROOT=")
+    if run_root_ln:
+        return f"Stage C: starting | {run_root_ln}"
+
+    return f"Stage C: running | {last_line}"
 
 
 def _pipeline_start_time(run_root: Path) -> Tuple[Optional[datetime], str]:
@@ -533,6 +620,7 @@ def print_table(run_root: Path, stage_a: List[dict], stage_b: List[dict], rows: 
     print()
     print(_stage_a_totals(stage_a))
     print(_stage_b_totals(stage_b))
+    print(_collect_stage_c_status(run_root))
     final_line = _pipeline_final_line(run_root, stage_a, stage_b)
     if final_line:
         print(final_line)
