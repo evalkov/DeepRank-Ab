@@ -440,10 +440,8 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     .util-row{margin-top:7px}
     .util-head{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:var(--muted)}
     .util-head .v{color:var(--ink);font-weight:700}
-    .stage-summary{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-    .chip{display:inline-block;background:var(--chip);border:1px solid #cfe0ff;border-radius:999px;padding:4px 10px;font-weight:600}
     .prefix{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-top:14px}
-    .head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+    .head{display:flex;justify-content:flex-start;gap:10px;align-items:flex-start}
     .badges{display:flex;gap:8px;flex-wrap:wrap}
     .badge{padding:3px 9px;border-radius:999px;font-weight:700;font-size:12px;border:1px solid}
     .bA{background:#e9f2ff;color:#1d4ed8;border-color:#bfd7ff}
@@ -554,12 +552,6 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     parts.append("</div>")
     parts.append("</div>")
 
-    parts.append("<div class='stage-summary'>")
-    for stg in sorted(stage_counts.keys()):
-        parts.append(f"<span class='chip'>Stage {escape(stg)}: {stage_counts[stg]}</span>")
-    parts.append("</div>")
-
-    parts.append("<h2>Per-Prefix Breakdown</h2>")
     for rep in normalized:
         prefix = str(rep.get("prefix", "unknown"))
         meta = rep.get("_meta", {})
@@ -596,7 +588,6 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
 
         parts.append("<div class='prefix'>")
         parts.append("<div class='head'>")
-        parts.append(f"<h3><code>{escape(prefix)}</code></h3>")
         parts.append("<div class='badges'>")
         parts.append(f"<span class='badge {badge_cls}'>Stage {escape(stage)}</span>")
         parts.append(f"<span class='badge bX'>Job {escape(str(job))}_{escape(str(task))}</span>")
