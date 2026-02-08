@@ -244,6 +244,7 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     normalized: List[Dict[str, Any]] = []
     stage_counts: Counter[str] = Counter()
     total_duration = 0.0
+    bottleneck_prefixes = 0
 
     cpu_means: List[float] = []
     gpu_util_maxes: List[float] = []
@@ -257,6 +258,8 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     net_tx_gib_total = 0.0
     disk_total_mean_mbps: List[float] = []
     net_total_mean_mbps: List[float] = []
+    disk_write_burst_ratios: List[float] = []
+    gpu_duty_samples_pct: List[float] = []
     pipeline_start: Optional[datetime] = None
     pipeline_end: Optional[datetime] = None
 
@@ -291,9 +294,12 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
                 busy_cores_peak.append((cp95 / 100.0) * logical_cpus)
 
             dwr_mean = _as_float((sys.get("disk_w_MBps") or {}).get("mean"))
+            dwr_p95 = _as_float((sys.get("disk_w_MBps") or {}).get("p95"))
             drd_mean = _as_float((sys.get("disk_r_MBps") or {}).get("mean"))
             if dwr_mean is not None or drd_mean is not None:
                 disk_total_mean_mbps.append((dwr_mean or 0.0) + (drd_mean or 0.0))
+            if dwr_mean is not None and dwr_p95 is not None and dwr_mean > 0:
+                disk_write_burst_ratios.append(dwr_p95 / dwr_mean)
             dur_s = _as_float(rep.get("duration_s")) or 0.0
             if dwr_mean is not None and dur_s > 0:
                 disk_write_gib_total += (dwr_mean * dur_s) / 1024.0
@@ -318,9 +324,17 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
                 gmax = max(gmax, umax)
             if bool(g.get("active")):
                 g_active += 1
+            if stage == "B":
+                f50 = _as_float((g.get("util") or {}).get("frac_ge50"))
+                if f50 is not None:
+                    gpu_duty_samples_pct.append(100.0 * f50)
         gpu_util_maxes.append(gmax)
         gpu_slots_per_prefix.append(len(rep.get("gpus") or []))
         active_gpus_per_prefix.append(g_active)
+
+        findings = _top_findings(rep, stage)
+        if findings:
+            bottleneck_prefixes += 1
 
         rep["_meta"] = {
             "stage": stage,
@@ -329,6 +343,7 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
             "host": host,
             "logical_cpus": logical_cpus,
         }
+        rep["_findings"] = findings
         normalized.append(rep)
 
     normalized.sort(key=lambda r: (r["_meta"]["stage"], r["_meta"]["job"], r["_meta"]["task"]))
@@ -342,9 +357,20 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     kpi_gpu_active_peak = max(active_gpus_per_prefix) if active_gpus_per_prefix else 0
     kpi_disk_total_mean = sum(disk_total_mean_mbps) / len(disk_total_mean_mbps) if disk_total_mean_mbps else None
     kpi_net_total_mean = sum(net_total_mean_mbps) / len(net_total_mean_mbps) if net_total_mean_mbps else None
+    kpi_gpu_duty_cycle = sum(gpu_duty_samples_pct) / len(gpu_duty_samples_pct) if gpu_duty_samples_pct else None
+    kpi_bottleneck_prefixes = (100.0 * bottleneck_prefixes / kpi_total) if kpi_total > 0 else None
+    kpi_disk_burstiness = None
+    if disk_write_burst_ratios:
+        s = sorted(disk_write_burst_ratios)
+        n = len(s)
+        mid = n // 2
+        kpi_disk_burstiness = s[mid] if n % 2 == 1 else 0.5 * (s[mid - 1] + s[mid])
     pipeline_wall_s = None
     if pipeline_start is not None and pipeline_end is not None and pipeline_end >= pipeline_start:
         pipeline_wall_s = (pipeline_end - pipeline_start).total_seconds()
+    kpi_effective_parallelism = None
+    if pipeline_wall_s is not None and pipeline_wall_s > 0:
+        kpi_effective_parallelism = total_duration / pipeline_wall_s
     kpi_busy_core_saturation = None
     if kpi_busy_cores_peak is not None and kpi_logical_cpus is not None and kpi_logical_cpus > 0:
         kpi_busy_core_saturation = 100.0 * (kpi_busy_cores_peak / kpi_logical_cpus)
@@ -418,14 +444,20 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     # Top summary and utilization snapshot
     parts.append("<div class='top-grid'>")
     parts.append("<div class='kpis'>")
-    parts.append(f"<div class='kpi'><div class='label'>Metric Prefixes</div><div class='val'>{kpi_total}</div><div class='sub'>per-task metric bundles</div></div>")
     parts.append(f"<div class='kpi'><div class='label'>Pipeline Walltime</div><div class='val'>{escape(_fmt_duration(pipeline_wall_s))}</div><div class='sub'>from earliest metric start to latest metric end</div></div>")
     parts.append(f"<div class='kpi'><div class='label'>Summed Observed Walltime</div><div class='val'>{escape(_fmt_duration(total_duration))}</div><div class='sub'>sum of per-prefix durations</div></div>")
-    parts.append(f"<div class='kpi'><div class='label'>CPU Capacity Observed</div><div class='val'>{escape(_fmt(kpi_logical_cpus, nd=0))}</div><div class='sub'>logical CPUs from per-core metrics</div></div>")
-    parts.append(f"<div class='kpi'><div class='label'>Peak Busy CPU Cores</div><div class='val'>{escape(_fmt(kpi_busy_cores_peak, nd=2))}</div><div class='sub'>estimated from cpu_total% and per-core count</div></div>")
+    parts.append(f"<div class='kpi'><div class='label'>Effective Parallelism</div><div class='val'>{escape(_fmt(kpi_effective_parallelism, nd=2, suffix='x'))}</div><div class='sub'>summed observed walltime / pipeline walltime</div></div>")
+    parts.append(f"<div class='kpi'><div class='label'>Bottlenecked Prefixes</div><div class='val'>{escape(_fmt_pct(kpi_bottleneck_prefixes))}</div><div class='sub'>{bottleneck_prefixes} of {kpi_total} prefixes flagged</div></div>")
+    parts.append(
+        f"<div class='kpi'><div class='label'>CPU Capacity / Peak Busy</div>"
+        f"<div class='val'>{escape(_fmt(kpi_logical_cpus, nd=0))} / {escape(_fmt(kpi_busy_cores_peak, nd=2))}</div>"
+        "<div class='sub'>logical CPUs observed / estimated peak busy cores</div></div>"
+    )
     parts.append(f"<div class='kpi'><div class='label'>CPU Mean (avg prefixes)</div><div class='val'>{escape(_fmt_pct(kpi_cpu_mean))}</div><div class='sub'>node-level cpu_total_pct</div></div>")
     parts.append(f"<div class='kpi'><div class='label'>GPU Slots / Active Peak</div><div class='val'>{kpi_gpu_slots} / {kpi_gpu_active_peak}</div><div class='sub'>observed slots / max active GPUs</div></div>")
     parts.append(f"<div class='kpi'><div class='label'>Peak GPU Util</div><div class='val'>{escape(_fmt_pct(kpi_gpu_peak))}</div><div class='sub'>max util_gpu_pct observed</div></div>")
+    parts.append(f"<div class='kpi'><div class='label'>GPU Duty Cycle (Stage B)</div><div class='val'>{escape(_fmt_pct(kpi_gpu_duty_cycle))}</div><div class='sub'>mean fraction of time with util >= 50%</div></div>")
+    parts.append(f"<div class='kpi'><div class='label'>Disk Burstiness (P95/Mean)</div><div class='val'>{escape(_fmt(kpi_disk_burstiness, nd=2, suffix='x'))}</div><div class='sub'>median per-prefix write burst ratio</div></div>")
     parts.append(
         f"<div class='kpi'><div class='label'>Estimated Data Generated / Read</div>"
         f"<div class='val'>W {escape(_fmt(disk_write_gib_total, nd=2, suffix=' GiB'))} / R {escape(_fmt(disk_read_gib_total, nd=2, suffix=' GiB'))}</div>"
@@ -503,7 +535,7 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
             if umax is not None:
                 gpu_util_peak = max(gpu_util_peak, umax)
 
-        findings = _top_findings(rep, stage)
+        findings = rep.get("_findings") or _top_findings(rep, stage)
         notes_html = "".join(f"<li>{escape(x)}</li>" for x in findings) if findings else "<li>none</li>"
 
         parts.append("<div class='prefix'>")
