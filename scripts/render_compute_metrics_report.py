@@ -260,6 +260,10 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     net_total_mean_mbps: List[float] = []
     disk_write_burst_ratios: List[float] = []
     gpu_duty_samples_pct: List[float] = []
+    iowait_p95_samples_pct: List[float] = []
+    mem_pressure_samples_pct: List[float] = []
+    mem_used_peak_samples_mib: List[float] = []
+    gpu_mem_peak_samples_mib: List[float] = []
     pipeline_start: Optional[datetime] = None
     pipeline_end: Optional[datetime] = None
 
@@ -293,6 +297,23 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
             if cp95 is not None and logical_cpus is not None:
                 busy_cores_peak.append((cp95 / 100.0) * logical_cpus)
 
+            iow_p95 = _as_float((sys.get("cpu_iowait") or {}).get("p95"))
+            if iow_p95 is not None:
+                iowait_p95_samples_pct.append(iow_p95)
+
+            mem_used_max = _as_float((sys.get("mem_used_mib") or {}).get("max"))
+            mem_avail_min = _as_float((sys.get("mem_avail_mib") or {}).get("min"))
+            if mem_used_max is not None:
+                mem_used_peak_samples_mib.append(mem_used_max)
+            if (
+                mem_used_max is not None
+                and mem_avail_min is not None
+                and mem_used_max >= 0
+                and mem_avail_min >= 0
+                and (mem_used_max + mem_avail_min) > 0
+            ):
+                mem_pressure_samples_pct.append(100.0 * mem_used_max / (mem_used_max + mem_avail_min))
+
             dwr_mean = _as_float((sys.get("disk_w_MBps") or {}).get("mean"))
             dwr_p95 = _as_float((sys.get("disk_w_MBps") or {}).get("p95"))
             drd_mean = _as_float((sys.get("disk_r_MBps") or {}).get("mean"))
@@ -324,6 +345,9 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
                 gmax = max(gmax, umax)
             if bool(g.get("active")):
                 g_active += 1
+            gmem_max = _as_float((g.get("mem_mib") or {}).get("max"))
+            if gmem_max is not None:
+                gpu_mem_peak_samples_mib.append(gmem_max)
             if stage == "B":
                 f50 = _as_float((g.get("util") or {}).get("frac_ge50"))
                 if f50 is not None:
@@ -374,6 +398,22 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     kpi_busy_core_saturation = None
     if kpi_busy_cores_peak is not None and kpi_logical_cpus is not None and kpi_logical_cpus > 0:
         kpi_busy_core_saturation = 100.0 * (kpi_busy_cores_peak / kpi_logical_cpus)
+    kpi_idle_overhead_pct = None
+    if kpi_busy_core_saturation is not None:
+        kpi_idle_overhead_pct = max(0.0, 100.0 - min(100.0, kpi_busy_core_saturation))
+    kpi_iowait_p95_peak = max(iowait_p95_samples_pct) if iowait_p95_samples_pct else None
+    kpi_mem_pressure_peak = max(mem_pressure_samples_pct) if mem_pressure_samples_pct else None
+    kpi_mem_used_peak_mib = max(mem_used_peak_samples_mib) if mem_used_peak_samples_mib else None
+    kpi_gpu_mem_peak_mib = max(gpu_mem_peak_samples_mib) if gpu_mem_peak_samples_mib else None
+    kpi_gpu_mem_peak_gib = None if kpi_gpu_mem_peak_mib is None else (kpi_gpu_mem_peak_mib / 1024.0)
+    if kpi_gpu_mem_peak_gib is None:
+        gpu_mem_cap_gib = 48.0
+    elif kpi_gpu_mem_peak_gib <= 48.0:
+        gpu_mem_cap_gib = 48.0
+    elif kpi_gpu_mem_peak_gib <= 80.0:
+        gpu_mem_cap_gib = 80.0
+    else:
+        gpu_mem_cap_gib = max(100.0, kpi_gpu_mem_peak_gib * 1.1)
 
     css = """
     :root{
@@ -484,8 +524,20 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
         f"<span class='v'>{escape(_fmt_pct(kpi_busy_core_saturation))}</span></div>{_bar(kpi_busy_core_saturation, cap=100.0)}</div>"
     )
     parts.append(
+        "<div class='util-row'><div class='util-head'><span>CPU iowait p95 (peak)</span>"
+        f"<span class='v'>{escape(_fmt_pct(kpi_iowait_p95_peak))}</span></div>{_bar(kpi_iowait_p95_peak, cap=30.0)}</div>"
+    )
+    parts.append(
+        "<div class='util-row'><div class='util-head'><span>Memory pressure proxy (peak)</span>"
+        f"<span class='v'>{escape(_fmt_pct(kpi_mem_pressure_peak))} | used max {escape(_fmt_bytes_mib_to_gib(kpi_mem_used_peak_mib))}</span></div>{_bar(kpi_mem_pressure_peak, cap=100.0)}</div>"
+    )
+    parts.append(
         "<div class='util-row'><div class='util-head'><span>GPU peak utilization</span>"
         f"<span class='v'>{escape(_fmt_pct(kpi_gpu_peak))}</span></div>{_bar(kpi_gpu_peak, cap=100.0)}</div>"
+    )
+    parts.append(
+        "<div class='util-row'><div class='util-head'><span>GPU memory peak</span>"
+        f"<span class='v'>{escape(_fmt(kpi_gpu_mem_peak_gib, nd=2, suffix=' GiB'))}</span></div>{_bar(kpi_gpu_mem_peak_gib, cap=gpu_mem_cap_gib)}</div>"
     )
     parts.append(
         "<div class='util-row'><div class='util-head'><span>Disk throughput mean (R+W)</span>"
@@ -494,6 +546,10 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, me
     parts.append(
         "<div class='util-row'><div class='util-head'><span>Network throughput mean (TX+RX)</span>"
         f"<span class='v'>{escape(_fmt(kpi_net_total_mean, nd=2, suffix=' MB/s'))}</span></div>{_bar(kpi_net_total_mean, cap=25.0)}</div>"
+    )
+    parts.append(
+        "<div class='util-row'><div class='util-head'><span>Queue/idle overhead proxy</span>"
+        f"<span class='v'>{escape(_fmt_pct(kpi_idle_overhead_pct))}</span></div>{_bar(kpi_idle_overhead_pct, cap=100.0)}</div>"
     )
     parts.append("</div>")
     parts.append("</div>")
