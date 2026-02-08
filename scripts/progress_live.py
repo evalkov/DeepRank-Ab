@@ -123,6 +123,24 @@ def _find_stage_c_done_time(run_root: Path) -> Tuple[Optional[Path], Optional[da
     return done_hits[0][1], done_hits[0][0]
 
 
+def _pipeline_start_time(run_root: Path) -> Tuple[Optional[datetime], str]:
+    """Resolve pipeline start time from launcher metadata, with fallback."""
+    jobs_file = run_root / "pipeline_jobs.json"
+    jobs_info = _read_json(jobs_file) or {}
+    if isinstance(jobs_info, dict):
+        for key in ("pipeline_invoked_at", "pipeline_launched_at", "pipeline_started_at"):
+            dt = _parse_iso(jobs_info.get(key))
+            if dt is not None:
+                return dt, f"{jobs_file.name}:{key}"
+    if jobs_file.exists():
+        try:
+            dt = datetime.fromtimestamp(jobs_file.stat().st_mtime)
+            return dt, f"{jobs_file.name}:mtime"
+        except OSError:
+            pass
+    return None, "stage-progress"
+
+
 def _pipeline_final_line(run_root: Path, stage_a: List[dict], stage_b: List[dict]) -> Optional[str]:
     if not stage_a or not stage_b:
         return None
@@ -136,26 +154,32 @@ def _pipeline_final_line(run_root: Path, stage_a: List[dict], stage_b: List[dict
     if end_dt is None:
         return None
 
-    starts = []
-    for s in stage_a:
-        dt = _parse_iso(s.get("started_at"))
-        if dt is not None:
-            starts.append(dt)
-    for s in stage_b:
-        dt = _parse_iso(s.get("started_at"))
-        if dt is not None:
-            starts.append(dt)
-    if not starts:
-        return None
+    start_dt, start_src = _pipeline_start_time(run_root)
+    if start_dt is None:
+        starts = []
+        for s in stage_a:
+            dt = _parse_iso(s.get("started_at"))
+            if dt is not None:
+                starts.append(dt)
+        for s in stage_b:
+            dt = _parse_iso(s.get("started_at"))
+            if dt is not None:
+                starts.append(dt)
+        if not starts:
+            return None
+        start_dt = min(starts)
+        start_src = "stage-progress"
 
-    start_dt = min(starts)
     wall_s = int((end_dt - start_dt).total_seconds())
 
     start_s = start_dt.strftime("%Y-%m-%d %H:%M:%S")
     end_s = end_dt.strftime("%Y-%m-%d %H:%M:%S")
     wall_s_str = _fmt_wall_s(wall_s)
     source = c_log.name if c_log else "drab-C log"
-    return f"Pipeline complete: start={start_s}  end={end_s}  wall={wall_s_str}  ({source})"
+    return (
+        f"Pipeline complete: start={start_s}  end={end_s}  wall={wall_s_str}  "
+        f"(start={start_src}; end={source})"
+    )
 
 
 def _state_order(state: str) -> int:

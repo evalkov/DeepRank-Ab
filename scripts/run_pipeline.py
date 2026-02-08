@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -679,6 +680,7 @@ def run_pipeline_dynamic(
 # =============================================================================
 
 def main() -> int:
+    pipeline_invoked_at = datetime.now().isoformat(timespec="seconds")
     parser = argparse.ArgumentParser(
         description="DeepRank-Ab Pipeline Launcher (Dynamic Resource Allocation)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -827,6 +829,8 @@ def main() -> int:
             "config": str(args.config),
             "stages": stages,
             "jobs": {r.stage: r.job_id for r in results if r.job_id},
+            "pipeline_invoked_at": pipeline_invoked_at,
+            "jobs_recorded_at": datetime.now().isoformat(timespec="seconds"),
         }
         with open(info_file, "w") as f:
             json.dump(info, f, indent=2)
