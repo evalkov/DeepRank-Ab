@@ -61,6 +61,22 @@ def _safe_slug(s: str) -> str:
     return s or "unknown"
 
 
+def _infer_logical_cpus(prefix: str, metrics_dir: Optional[Path]) -> Optional[int]:
+    if metrics_dir is None:
+        return None
+    p = metrics_dir / f"cpu_percore_{prefix}.csv"
+    if not p.is_file():
+        return None
+    try:
+        header = p.open("r").readline().strip().split(",")
+    except Exception:
+        return None
+    if not header:
+        return None
+    ncpu = sum(1 for h in header if re.fullmatch(r"cpu\d+_pct", h))
+    return ncpu if ncpu > 0 else None
+
+
 def _load_reports(path_or_dir: Path) -> Tuple[List[Dict[str, Any]], Path]:
     p = path_or_dir.expanduser().resolve()
     if p.is_dir():
@@ -186,8 +202,16 @@ def _top_findings(rep: Dict[str, Any], stage: str) -> List[str]:
 
     for n in rep.get("notes") or []:
         s = str(n).strip()
-        if s:
-            out.append(s)
+        if not s:
+            continue
+        # Stage A is CPU-only; hide noisy GPU-missing notes.
+        if stage in {"A", "C"} and (
+            s.startswith("missing/empty gpu_metrics_")
+            or s.startswith("missing/empty gpu_pmon_")
+            or "gpu_metrics missing; using pmon-only" in s
+        ):
+            continue
+        out.append(s)
     # Keep report concise.
     uniq: List[str] = []
     seen = set()
@@ -198,15 +222,21 @@ def _top_findings(rep: Dict[str, Any], stage: str) -> List[str]:
     return uniq[:6]
 
 
-def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str) -> str:
+def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str, metrics_dir: Optional[Path]) -> str:
     normalized: List[Dict[str, Any]] = []
     stage_counts: Counter[str] = Counter()
     total_duration = 0.0
 
     cpu_means: List[float] = []
     gpu_util_maxes: List[float] = []
-    disk_w_maxes: List[float] = []
-    net_tx_maxes: List[float] = []
+    logical_cpu_counts: List[int] = []
+    busy_cores_peak: List[float] = []
+    gpu_slots_per_prefix: List[int] = []
+    active_gpus_per_prefix: List[int] = []
+    disk_read_gib_total = 0.0
+    disk_write_gib_total = 0.0
+    net_rx_gib_total = 0.0
+    net_tx_gib_total = 0.0
 
     for rep in reports:
         prefix = str(rep.get("prefix", "unknown"))
@@ -217,25 +247,56 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str) ->
         total_duration += dur
 
         sys = rep.get("sys")
+        logical_cpus = _infer_logical_cpus(prefix, metrics_dir)
+        if logical_cpus is not None:
+            logical_cpu_counts.append(logical_cpus)
+
         if sys:
             cmean = _as_float((sys.get("cpu_total") or {}).get("mean"))
             if cmean is not None:
                 cpu_means.append(cmean)
-            dmax = _as_float((sys.get("disk_w_MBps") or {}).get("max"))
-            if dmax is not None:
-                disk_w_maxes.append(dmax)
-            ntx = _as_float(((sys.get("net_tx_MBps") or {}) if sys.get("net_tx_MBps") else {}).get("max"))
-            if ntx is not None:
-                net_tx_maxes.append(ntx)
+                if logical_cpus is not None:
+                    busy_cores_peak.append((cmean / 100.0) * logical_cpus)
+
+            cp95 = _as_float((sys.get("cpu_total") or {}).get("p95"))
+            if cp95 is not None and logical_cpus is not None:
+                busy_cores_peak.append((cp95 / 100.0) * logical_cpus)
+
+            dwr_mean = _as_float((sys.get("disk_w_MBps") or {}).get("mean"))
+            drd_mean = _as_float((sys.get("disk_r_MBps") or {}).get("mean"))
+            dur_s = _as_float(rep.get("duration_s")) or 0.0
+            if dwr_mean is not None and dur_s > 0:
+                disk_write_gib_total += (dwr_mean * dur_s) / 1024.0
+            if drd_mean is not None and dur_s > 0:
+                disk_read_gib_total += (drd_mean * dur_s) / 1024.0
+
+            nrx_mean = _as_float(((sys.get("net_rx_MBps") or {}) if sys.get("net_rx_MBps") else {}).get("mean"))
+            ntx_mean = _as_float(((sys.get("net_tx_MBps") or {}) if sys.get("net_tx_MBps") else {}).get("mean"))
+            if dur_s > 0:
+                if nrx_mean is not None:
+                    net_rx_gib_total += (nrx_mean * dur_s) / 1024.0
+                if ntx_mean is not None:
+                    net_tx_gib_total += (ntx_mean * dur_s) / 1024.0
 
         gmax = 0.0
+        g_active = 0
         for g in rep.get("gpus") or []:
             umax = _as_float((g.get("util") or {}).get("max"))
             if umax is not None:
                 gmax = max(gmax, umax)
+            if bool(g.get("active")):
+                g_active += 1
         gpu_util_maxes.append(gmax)
+        gpu_slots_per_prefix.append(len(rep.get("gpus") or []))
+        active_gpus_per_prefix.append(g_active)
 
-        rep["_meta"] = {"stage": stage, "job": job, "task": task, "host": host}
+        rep["_meta"] = {
+            "stage": stage,
+            "job": job,
+            "task": task,
+            "host": host,
+            "logical_cpus": logical_cpus,
+        }
         normalized.append(rep)
 
     normalized.sort(key=lambda r: (r["_meta"]["stage"], r["_meta"]["job"], r["_meta"]["task"]))
@@ -243,8 +304,11 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str) ->
     kpi_total = len(normalized)
     kpi_cpu_mean = sum(cpu_means) / len(cpu_means) if cpu_means else None
     kpi_gpu_peak = max(gpu_util_maxes) if gpu_util_maxes else None
-    kpi_disk_peak = max(disk_w_maxes) if disk_w_maxes else None
-    kpi_net_peak = max(net_tx_maxes) if net_tx_maxes else None
+    kpi_logical_cpus = max(logical_cpu_counts) if logical_cpu_counts else None
+    kpi_busy_cores_peak = max(busy_cores_peak) if busy_cores_peak else None
+    kpi_gpu_slots = max(gpu_slots_per_prefix) if gpu_slots_per_prefix else 0
+    kpi_gpu_active_peak = max(active_gpus_per_prefix) if active_gpus_per_prefix else 0
+    kpi_stage_mix = f"A:{stage_counts.get('A', 0)} B:{stage_counts.get('B', 0)} C:{stage_counts.get('C', 0)}"
 
     css = """
     :root{
@@ -259,7 +323,7 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str) ->
     h2{margin:24px 0 10px;font-size:20px}
     h3{margin:0;font-size:17px}
     p.meta{margin:0 0 18px;color:var(--muted)}
-    .kpis{display:grid;grid-template-columns:repeat(6,minmax(180px,1fr));gap:12px}
+    .kpis{display:grid;grid-template-columns:repeat(5,minmax(180px,1fr));gap:12px}
     .kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
     .kpi .label{color:var(--muted);font-size:12px}
     .kpi .val{font-size:24px;font-weight:700;margin-top:4px}
@@ -308,11 +372,23 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str) ->
     # KPIs
     parts.append("<div class='kpis'>")
     parts.append(f"<div class='kpi'><div class='label'>Metric Prefixes</div><div class='val'>{kpi_total}</div><div class='sub'>per-task metric bundles</div></div>")
+    parts.append(f"<div class='kpi'><div class='label'>Stage Mix</div><div class='val'>{escape(kpi_stage_mix)}</div><div class='sub'>prefix count by stage</div></div>")
     parts.append(f"<div class='kpi'><div class='label'>Summed Observed Walltime</div><div class='val'>{escape(_fmt_duration(total_duration))}</div><div class='sub'>sum of per-prefix durations</div></div>")
-    parts.append(f"<div class='kpi'><div class='label'>CPU Mean (avg of prefixes)</div><div class='val'>{escape(_fmt_pct(kpi_cpu_mean))}</div><div class='sub'>node-level cpu_total_pct</div></div>")
+    parts.append(f"<div class='kpi'><div class='label'>CPU Capacity Observed</div><div class='val'>{escape(_fmt(kpi_logical_cpus, nd=0))}</div><div class='sub'>logical CPUs from per-core metrics</div></div>")
+    parts.append(f"<div class='kpi'><div class='label'>Peak Busy CPU Cores</div><div class='val'>{escape(_fmt(kpi_busy_cores_peak, nd=2))}</div><div class='sub'>estimated from cpu_total% and per-core count</div></div>")
+    parts.append(f"<div class='kpi'><div class='label'>CPU Mean (avg prefixes)</div><div class='val'>{escape(_fmt_pct(kpi_cpu_mean))}</div><div class='sub'>node-level cpu_total_pct</div></div>")
+    parts.append(f"<div class='kpi'><div class='label'>GPU Slots / Active Peak</div><div class='val'>{kpi_gpu_slots} / {kpi_gpu_active_peak}</div><div class='sub'>observed slots / max active GPUs</div></div>")
     parts.append(f"<div class='kpi'><div class='label'>Peak GPU Util</div><div class='val'>{escape(_fmt_pct(kpi_gpu_peak))}</div><div class='sub'>max util_gpu_pct observed</div></div>")
-    parts.append(f"<div class='kpi'><div class='label'>Peak Disk Write</div><div class='val'>{escape(_fmt(kpi_disk_peak, nd=1, suffix=' MB/s'))}</div><div class='sub'>max disk_write_MBps</div></div>")
-    parts.append(f"<div class='kpi'><div class='label'>Peak Network TX</div><div class='val'>{escape(_fmt(kpi_net_peak, nd=2, suffix=' MB/s'))}</div><div class='sub'>max net_tx_MBps</div></div>")
+    parts.append(
+        f"<div class='kpi'><div class='label'>Estimated Data Generated / Read</div>"
+        f"<div class='val'>W {escape(_fmt(disk_write_gib_total, nd=2, suffix=' GiB'))} / R {escape(_fmt(disk_read_gib_total, nd=2, suffix=' GiB'))}</div>"
+        "<div class='sub'>disk write/read volumes from mean MB/s x duration</div></div>"
+    )
+    parts.append(
+        f"<div class='kpi'><div class='label'>Estimated Copied To / From</div>"
+        f"<div class='val'>TX {escape(_fmt(net_tx_gib_total, nd=2, suffix=' GiB'))} / RX {escape(_fmt(net_rx_gib_total, nd=2, suffix=' GiB'))}</div>"
+        "<div class='sub'>network tx/rx volumes from mean MB/s x duration</div></div>"
+    )
     parts.append("</div>")
 
     parts.append("<div class='stage-summary'>")
@@ -328,6 +404,7 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str) ->
         job = meta.get("job", "—")
         task = meta.get("task", "—")
         host = meta.get("host", "—")
+        logical_cpus = _as_float(meta.get("logical_cpus"))
         badge_cls = "bA" if stage == "A" else ("bB" if stage == "B" else ("bC" if stage == "C" else "bX"))
 
         sys = rep.get("sys")
@@ -336,6 +413,8 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str) ->
 
         cpu_mean = _as_float(((sys or {}).get("cpu_total") or {}).get("mean"))
         cpu_p95 = _as_float(((sys or {}).get("cpu_total") or {}).get("p95"))
+        busy_cores_mean = None if (cpu_mean is None or logical_cpus is None) else (cpu_mean / 100.0) * logical_cpus
+        busy_cores_p95 = None if (cpu_p95 is None or logical_cpus is None) else (cpu_p95 / 100.0) * logical_cpus
         mem_max = _as_float(((sys or {}).get("mem_used_mib") or {}).get("max"))
         disk_w_p95 = _as_float(((sys or {}).get("disk_w_MBps") or {}).get("p95"))
         net_tx_p95 = _as_float((((sys or {}).get("net_tx_MBps") or {}) if sys and (sys.get("net_tx_MBps") is not None) else {}).get("p95"))
@@ -367,6 +446,11 @@ def render_html(reports: List[Dict[str, Any]], src_path: Path, run_root: str) ->
             "<div class='mini'><div class='k'>CPU total mean / p95</div>"
             f"<div class='v'>{escape(_fmt_pct(cpu_mean))} / {escape(_fmt_pct(cpu_p95))}</div>"
             f"{_bar(cpu_mean, cap=100.0)}</div>"
+        )
+        parts.append(
+            "<div class='mini'><div class='k'>Busy cores est (mean / p95)</div>"
+            f"<div class='v'>{escape(_fmt(busy_cores_mean))} / {escape(_fmt(busy_cores_p95))}</div>"
+            f"{_bar(busy_cores_p95, cap=max(1.0, logical_cpus or 1.0))}</div>"
         )
         parts.append(
             "<div class='mini'><div class='k'>GPU active / peak util</div>"
@@ -470,6 +554,14 @@ def main() -> None:
         else:
             run_root = str(src.parent)
 
+    metrics_dir: Optional[Path] = None
+    if src.parent.name == "compute_metrics":
+        metrics_dir = src.parent.resolve()
+    else:
+        candidate = Path(run_root) / "compute_metrics"
+        if candidate.is_dir():
+            metrics_dir = candidate.resolve()
+
     if args.out:
         out_html = Path(args.out).expanduser().resolve()
     else:
@@ -479,7 +571,7 @@ def main() -> None:
             out_html = (src.parent / f"compute_metrics_report_{_safe_slug(src.stem)}.html").resolve()
 
     out_html.parent.mkdir(parents=True, exist_ok=True)
-    html = render_html(reports=reports, src_path=src, run_root=run_root)
+    html = render_html(reports=reports, src_path=src, run_root=run_root, metrics_dir=metrics_dir)
     out_html.write_text(html)
     print(f"Wrote HTML report: {out_html}")
 
