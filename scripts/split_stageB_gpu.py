@@ -34,6 +34,7 @@ $RUN_ROOT/shards/shard_000000/
 
 import argparse
 import dataclasses as dc
+import errno
 import gzip
 import json
 import logging
@@ -45,7 +46,7 @@ import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any, Dict, List, Optional, Tuple
 
 import h5py
@@ -110,13 +111,53 @@ def atomic_write_text(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
-def atomic_copy(src: Path, dst: Path) -> None:
+def copy_with_retry_atomic(
+    src: Path,
+    dst: Path,
+    *,
+    max_attempts: int = 8,
+    base_sleep_s: float = 0.20,
+) -> None:
+    """Copy src->dst atomically with retries for transient BeeGFS errors."""
+    retry_errnos = {errno.EAGAIN, errno.EBUSY, getattr(errno, "ESTALE", -1)}
     safe_mkdir(dst.parent)
-    tmp = dst.with_suffix(dst.suffix + ".tmp")
-    if tmp.exists():
-        tmp.unlink()
-    shutil.copy2(src, tmp)
-    tmp.replace(dst)
+    tmp = dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
+
+    last_exc: Optional[OSError] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if tmp.exists():
+                tmp.unlink()
+            # Streamed copy avoids copy_file_range/sendfile edge cases on network FS.
+            with open(src, "rb") as fsrc, open(tmp, "wb") as fdst:
+                shutil.copyfileobj(fsrc, fdst, length=16 * 1024 * 1024)
+            shutil.copystat(src, tmp)
+            tmp.replace(dst)
+            return
+        except OSError as e:
+            last_exc = e
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+
+            if e.errno in retry_errnos and attempt < max_attempts:
+                wait_s = min(5.0, base_sleep_s * (2 ** (attempt - 1)))
+                log.warning(
+                    f"[copy-retry] attempt={attempt}/{max_attempts} errno={e.errno} "
+                    f"src={src} dst={dst} wait={wait_s:.2f}s"
+                )
+                sleep(wait_s)
+                continue
+            raise
+
+    if last_exc is not None:
+        raise last_exc
+
+
+def atomic_copy(src: Path, dst: Path) -> None:
+    copy_with_retry_atomic(src, dst)
 
 
 def atomic_write_json(path: Path, obj: dict) -> None:
@@ -757,7 +798,7 @@ def process_one_shard(
 
     graph_local = workdir / "graphs.h5"
     t_copy0 = perf_counter()
-    shutil.copy2(graph_src, graph_local)
+    copy_with_retry_atomic(graph_src, graph_local)
     timings["stage_graph_s"] = perf_counter() - t_copy0
     _write_progress_B(stage="copy", **_bprog)
 
@@ -887,7 +928,7 @@ def process_shard_post_esm(
     # Copy graph locally
     graph_local = workdir / "graphs.h5"
     t_copy0 = perf_counter()
-    shutil.copy2(graph_src, graph_local)
+    copy_with_retry_atomic(graph_src, graph_local)
     timings["stage_graph_s"] = perf_counter() - t_copy0
     _write_progress_B(stage="inject", **_bprog)
 
