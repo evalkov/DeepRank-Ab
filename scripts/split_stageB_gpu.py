@@ -44,6 +44,7 @@ import socket
 import subprocess
 import sys
 import traceback
+import uuid
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter, sleep
@@ -106,7 +107,8 @@ def safe_mkdir(p: Path) -> Path:
 
 
 def atomic_write_text(path: Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    safe_mkdir(path.parent)
+    tmp = path.parent / f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
     tmp.write_text(text)
     tmp.replace(path)
 
