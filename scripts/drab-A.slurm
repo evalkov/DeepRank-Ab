@@ -309,35 +309,42 @@ else
 fi
 
 # ------------------------------------------------------------
-# Determine how many shard lists exist
+# Determine how many shard lists exist (retry for BeeGFS metadata propagation)
 # ------------------------------------------------------------
-N_SHARDS="$(ls -1 "${SHARD_LIST_DIR}"/shard_*.lst 2>/dev/null | wc -l | tr -d ' ')"
+TASK="${SLURM_ARRAY_TASK_ID}"
+SHARD_ID="$(printf "%06d" "${TASK}")"
+SHARD_LST="${SHARD_LIST_DIR}/shard_${SHARD_ID}.lst"
+
+N_SHARDS=0
+for _w in $(seq 1 60); do
+  N_SHARDS="$(find "${SHARD_LIST_DIR}" -maxdepth 1 -name 'shard_*.lst' 2>/dev/null | wc -l)" || N_SHARDS=0
+  N_SHARDS="${N_SHARDS//[[:space:]]/}"
+  if (( N_SHARDS > 0 )) && [[ -f "${SHARD_LST}" ]]; then
+    break
+  fi
+  if (( _w == 1 )); then
+    echo "[StageA] Waiting for shard lists to propagate (BeeGFS)..."
+  fi
+  sleep 1
+done
+
 if (( N_SHARDS <= 0 )); then
-  echo "[StageA] ERROR: N_SHARDS=0 (no shard_*.lst found in ${SHARD_LIST_DIR})"
+  echo "[StageA] ERROR: N_SHARDS=0 (no shard_*.lst found in ${SHARD_LIST_DIR} after 60s)"
   exit 2
 fi
 
-TASK="${SLURM_ARRAY_TASK_ID}"
+if [[ ! -f "${SHARD_LST}" ]]; then
+  echo "[StageA] ERROR: shard list not found after 60s: ${SHARD_LST}"
+  exit 2
+fi
+
+if (( _w > 1 )); then
+  echo "[StageA] Shard lists visible after ${_w}s"
+fi
+
 if (( TASK >= N_SHARDS )); then
   echo "[StageA] Task ${TASK} >= N_SHARDS ${N_SHARDS}; exiting."
   exit 0
-fi
-
-SHARD_ID="$(printf "%06d" "${TASK}")"
-
-# Wait for the shard list file to be visible (BeeGFS metadata propagation)
-SHARD_LST="${SHARD_LIST_DIR}/shard_${SHARD_ID}.lst"
-if [[ ! -f "${SHARD_LST}" ]]; then
-  echo "[StageA] Waiting for shard list to propagate: ${SHARD_LST}"
-  for _w in $(seq 1 30); do
-    sleep 1
-    [[ -f "${SHARD_LST}" ]] && break
-  done
-  if [[ ! -f "${SHARD_LST}" ]]; then
-    echo "[StageA] ERROR: shard list not found after 30s: ${SHARD_LST}"
-    exit 2
-  fi
-  echo "[StageA] Shard list visible after ${_w}s"
 fi
 
 echo "[StageA] RUN_ROOT=${RUN_ROOT}"
