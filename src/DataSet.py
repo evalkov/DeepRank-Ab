@@ -49,7 +49,7 @@ def PreCluster(dataset, method):
     """
     Precompute and cache node clustering (mcl or louvain) at two depths.
     """
-    for fname, mol in tqdm(dataset.index_complexes):
+    for fname, mol in tqdm(dataset.index_complexes, file=sys.stdout):
         data = dataset.load_one_graph(fname, mol)
 
         if data is None:
