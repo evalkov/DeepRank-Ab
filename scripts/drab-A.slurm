@@ -325,6 +325,21 @@ fi
 
 SHARD_ID="$(printf "%06d" "${TASK}")"
 
+# Wait for the shard list file to be visible (BeeGFS metadata propagation)
+SHARD_LST="${SHARD_LIST_DIR}/shard_${SHARD_ID}.lst"
+if [[ ! -f "${SHARD_LST}" ]]; then
+  echo "[StageA] Waiting for shard list to propagate: ${SHARD_LST}"
+  for _w in $(seq 1 30); do
+    sleep 1
+    [[ -f "${SHARD_LST}" ]] && break
+  done
+  if [[ ! -f "${SHARD_LST}" ]]; then
+    echo "[StageA] ERROR: shard list not found after 30s: ${SHARD_LST}"
+    exit 2
+  fi
+  echo "[StageA] Shard list visible after ${_w}s"
+fi
+
 echo "[StageA] RUN_ROOT=${RUN_ROOT}"
 echo "[StageA] PDB_ROOT=${PDB_ROOT}"
 echo "[StageA] SHARD_LIST_DIR=${SHARD_LIST_DIR}"
