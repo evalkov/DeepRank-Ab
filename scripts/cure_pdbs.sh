@@ -155,7 +155,8 @@ SKIP_EXISTING="${SKIP_EXISTING:-1}"
 
 IN_ROOT="$(readlink -f "$IN_DIR")"
 OUT_ROOT="$(readlink -f "$OUT_DIR")"
-mkdir -p "$OUT_ROOT" slurm
+LOG_DIR="${LOG_DIR:-slurm}"
+mkdir -p "$OUT_ROOT" "$LOG_DIR"
 
 MANIFEST="${MANIFEST:-${OUT_ROOT}/manifest.pdbs.txt}"
 
@@ -202,8 +203,8 @@ sbatch \
   --mem=0 \
   --time="$TIME" \
   --array="0-$((NTASKS-1))" \
-  --output="slurm/cure_pdbs_%A_%a.out" \
-  --error="slurm/cure_pdbs_%A_%a.err" \
+  --output="${LOG_DIR}/cure_pdbs_%A_%a.out" \
+  --error="${LOG_DIR}/cure_pdbs_%A_%a.err" \
   --export=ALL,MANIFEST="$MANIFEST",IN_ROOT="$IN_ROOT",OUT_ROOT="$OUT_ROOT",JOBS_PER_TASK="$JOBS_PER_TASK",SKIP_EXISTING="$SKIP_EXISTING" \
   "$0" --worker
 
