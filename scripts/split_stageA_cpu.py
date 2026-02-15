@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import logging
 import os
 import shutil
 import socket
 import tempfile
+import warnings
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -32,6 +34,12 @@ from Bio.PDB.Polypeptide import PPBuilder
 from src.GraphGenMP import GraphHDF5
 from src.DataSet import HDF5DataSet, PreCluster
 from src.tools.annotate import annotate_folder_one_by_one_mp
+
+# Route warnings and logging to stdout so SLURM .err stays clean
+logging.basicConfig(stream=sys.stdout, level=logging.WARNING,
+                    format="[%(levelname)s] %(message)s")
+warnings.showwarning = lambda msg, cat, *a, **kw: print(
+    f"[{cat.__name__}] {msg}", flush=True)
 
 
 # -----------------------

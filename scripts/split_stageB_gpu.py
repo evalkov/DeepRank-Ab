@@ -79,7 +79,7 @@ from esm import FastaBatchedDataset, pretrained  # noqa: E402
 # ----------------------------
 log = logging.getLogger("drab-stageB")
 log.setLevel(logging.INFO)
-_hdl = logging.StreamHandler()
+_hdl = logging.StreamHandler(sys.stdout)
 _hdl.setFormatter(logging.Formatter(" [%(levelname)s] %(message)s"))
 log.addHandler(_hdl)
 
