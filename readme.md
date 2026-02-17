@@ -113,9 +113,11 @@ python3 scripts/merge_pred_hdf5.py --out merged.h5 pred_shard_*.h5
 
 ## Integration with NanobodyDesigner
 
-DeepRank-Ab is designed to be called from
-[NanobodyDesigner](https://github.com/evalkov/NanobodyDesigner), which
-owns all SLURM orchestration scripts. NanobodyDesigner's pipeline:
+The principal motivation for this version of DeepRank-Ab is to enable
+seamless integration with
+[NanobodyDesigner](https://github.com/evalkov/NanobodyDesigner) and to
+scale it to 100K-1M nanobody-antigen complexes. NanobodyDesigner owns
+all SLURM orchestration scripts. Its pipeline:
 
 1. Sets `DEEPRANK_ROOT` to this repo's path
 2. Generates wrapper scripts that source env vars and exec the SLURM
