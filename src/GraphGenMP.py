@@ -59,15 +59,39 @@ def _worker_init(config, result_queue=None):
     _WORKER_RESULT_QUEUE = result_queue
 
 
+class _GraphTimeout(Exception):
+    """Raised by SIGALRM when a single graph exceeds its time budget."""
+    pass
+
+
+# Default per-graph timeout (seconds). 0 = disabled.
+_DEFAULT_GRAPH_TIMEOUT = 300
+
+
 def _worker_process_graph(pdb_path):
     """
     Worker function: build a single graph and return it.
     Uses global config set by _worker_init.
     """
+    import signal
+
     global _WORKER_CONFIG
     global _WORKER_RESULT_QUEUE
     cfg = _WORKER_CONFIG
-    
+
+    timeout_s = int(cfg.get('graph_timeout', _DEFAULT_GRAPH_TIMEOUT))
+
+    def _alarm_handler(signum, frame):
+        raise _GraphTimeout(
+            f"Graph construction timed out after {timeout_s}s: {pdb_path}"
+        )
+
+    # Arm the alarm (only effective on Unix, which is the target platform).
+    prev_handler = None
+    if timeout_s > 0:
+        prev_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(timeout_s)
+
     try:
         if cfg['graph_type'] == 'residue':
             from ResidueGraph import ResidueGraph
@@ -90,7 +114,7 @@ def _worker_process_graph(pdb_path):
             )
         else:
             raise ValueError(f"Unknown graph_type: {cfg['graph_type']}")
-        
+
         # Optionally compute score against reference
         if cfg['ref'] is not None:
             g.get_score(cfg['ref'])
@@ -100,7 +124,7 @@ def _worker_process_graph(pdb_path):
             _WORKER_RESULT_QUEUE.put(g)
             return 1
         return g
-    
+
     except Exception as e:
         # Emit error tuple so writer can account for failures.
         err = ('ERROR', pdb_path, str(e))
@@ -108,6 +132,13 @@ def _worker_process_graph(pdb_path):
             _WORKER_RESULT_QUEUE.put(err)
             return 1
         return err
+
+    finally:
+        # Disarm the alarm and restore the previous handler.
+        if timeout_s > 0:
+            signal.alarm(0)
+            if prev_handler is not None:
+                signal.signal(signal.SIGALRM, prev_handler)
 
 
 def _build_region_map_entry(task):
@@ -366,6 +397,7 @@ class GraphHDF5(object):
         import time as _time
 
         # Configuration passed to each worker once at initialization
+        graph_timeout = _env_int("GRAPH_TIMEOUT", _DEFAULT_GRAPH_TIMEOUT)
         worker_config = {
             'graph_type': self.graph_type,
             'biopython': biopython,
@@ -375,6 +407,7 @@ class GraphHDF5(object):
             'antigen_chainid': self.antigen_chainid,
             'use_voro': self.use_voro,
             'ref': ref,
+            'graph_timeout': graph_timeout,
         }
         
         # Write initial graph progress so the live viewer can show 0/total immediately

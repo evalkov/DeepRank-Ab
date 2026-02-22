@@ -4,6 +4,8 @@ import subprocess
 from pathlib import Path
 import numpy as np
 
+VORONOTA_TIMEOUT = 120  # seconds per voronota subprocess call
+
 class VoronotaAreasLegacy:
     """
     Original two-step voronota implementation using legacy voronota binary.
@@ -83,7 +85,7 @@ class VoronotaAreasLegacy:
         return str(root_dir / "tools" / "voronota" / "voronota")
 
     @staticmethod
-    def run_voro_contacts(pdb_fpath, voronota_exec) -> tuple[bytes, bytes]:
+    def run_voro_contacts(pdb_fpath, voronota_exec, timeout=VORONOTA_TIMEOUT) -> tuple[bytes, bytes]:
         """Run two-step voronota pipeline."""
         with open(pdb_fpath, "rb") as fin:
             pdb_lines = fin.read()
@@ -94,7 +96,14 @@ class VoronotaAreasLegacy:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        balls_outputs, _ = balls.communicate(input=pdb_lines)
+        try:
+            balls_outputs, _ = balls.communicate(input=pdb_lines, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            balls.kill()
+            balls.wait()
+            raise RuntimeError(
+                f"voronota get-balls-from-atoms-file timed out after {timeout}s: {pdb_fpath}"
+            )
 
         contacts = subprocess.Popen(
             [voronota_exec, "calculate-contacts"],
@@ -102,7 +111,14 @@ class VoronotaAreasLegacy:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        contacts_outputs, _ = contacts.communicate(input=balls_outputs)
+        try:
+            contacts_outputs, _ = contacts.communicate(input=balls_outputs, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            contacts.kill()
+            contacts.wait()
+            raise RuntimeError(
+                f"voronota calculate-contacts timed out after {timeout}s: {pdb_fpath}"
+            )
 
         return balls_outputs, contacts_outputs
 
