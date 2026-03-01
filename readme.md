@@ -83,6 +83,11 @@ A folder of individual `.pdb` files, each containing an antibody-antigen
 complex. The user specifies which chain IDs correspond to heavy chain,
 light chain (or `-` for nanobodies/VHH), and antigen.
 
+PDB files should be pre-cleaned before use: remove hydrogens and OXT
+atoms, as these can interfere with contact detection and feature
+extraction. The legacy `scripts/deprecated/cure_pdbs.sh` script can
+do this in bulk.
+
 ```bash
 python scripts/split_stageA_cpu.py \
   --pdb-root /path/to/pdbs \
