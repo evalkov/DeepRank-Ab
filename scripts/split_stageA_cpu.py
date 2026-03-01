@@ -34,6 +34,7 @@ from Bio.PDB.Polypeptide import PPBuilder
 from src.GraphGenMP import GraphHDF5
 from src.DataSet import HDF5DataSet, PreCluster
 from src.tools.annotate import annotate_folder_one_by_one_mp
+from src.tools.quiver import QuiverReader
 
 # Route warnings and logging to stdout so SLURM .err stays clean
 logging.basicConfig(stream=sys.stdout, level=logging.WARNING,
@@ -345,6 +346,70 @@ def build_shard_lists(
     return out_lists
 
 
+def build_shard_lists_quiver(
+    qv_path: Path,
+    shard_lists_dir: Path,
+    target_gb: float,
+    max_per_shard: int,
+    min_per_shard: int,
+) -> List[Path]:
+    """
+    Create shard lists from a quiver archive.
+
+    Each shard list contains one tag name per line (instead of file paths).
+    Uses byte-offset deltas between entries as a size proxy.
+    """
+    safe_mkdir(shard_lists_dir)
+    reader = QuiverReader(str(qv_path))
+    n = len(reader)
+    if n == 0:
+        raise SystemExit(f"No entries in quiver: {qv_path}")
+
+    # Build (tag, estimated_size) pairs using offset deltas
+    entries = [(reader.entry(i).tag, reader.entry(i).byte_offset) for i in range(n)]
+    sorted_by_offset = sorted(entries, key=lambda x: x[1])
+    tag_sizes: Dict[str, int] = {}
+    for j, (tag, off) in enumerate(sorted_by_offset):
+        if j + 1 < len(sorted_by_offset):
+            tag_sizes[tag] = sorted_by_offset[j + 1][1] - off
+        else:
+            # Last entry — estimate from file size
+            tag_sizes[tag] = qv_path.stat().st_size - off
+
+    target_bytes = int(target_gb * (1024**3))
+    shards: List[List[str]] = []
+    cur: List[str] = []
+    cur_bytes = 0
+
+    def flush():
+        nonlocal cur, cur_bytes
+        if cur:
+            shards.append(cur)
+        cur = []
+        cur_bytes = 0
+
+    # Iterate in index order (preserves original ordering from .qv.idx)
+    for i in range(n):
+        tag = reader.entry(i).tag
+        sz = tag_sizes[tag]
+        if cur and (len(cur) >= max_per_shard or (cur_bytes + sz) > target_bytes) and len(cur) >= min_per_shard:
+            flush()
+        cur.append(tag)
+        cur_bytes += sz
+
+    flush()
+
+    out_lists: List[Path] = []
+    for i, shard in enumerate(shards):
+        out = shard_lists_dir / f"shard_{i:06d}.lst"
+        tmp = out.with_suffix(".tmp")
+        tmp.write_text("".join(tag + "\n" for tag in shard))
+        tmp.replace(out)
+        out_lists.append(out)
+
+    return out_lists
+
+
 # -----------------------
 # Stage A execution for one shard
 # -----------------------
@@ -464,6 +529,7 @@ def run_stageA_one_shard(
     do_cluster: bool,
     publish_stagea_done: bool = True,
     stagea_phase: str = "full",
+    quiver_path: Optional[Path] = None,
 ) -> StageAResult:
     """
     Produces shards/shard_<id>/graphs.h5 + manifest + metadata + STAGEA_DONE
@@ -501,28 +567,42 @@ def run_stageA_one_shard(
 
     try:
         # Read input list
-        inputs = [Path(x.strip()) for x in shard_list.read_text().splitlines() if x.strip()]
-        if not inputs:
+        raw_lines = [x.strip() for x in shard_list.read_text().splitlines() if x.strip()]
+        if not raw_lines:
             raise SystemExit(f"{shard_list}: empty")
-        _prog["n_inputs"] = len(inputs)
+        _prog["n_inputs"] = len(raw_lines)
 
-        # Stage PDBs to local (parallel I/O for network filesystems)
-        def _copy_pdb(src: Path) -> Path:
-            dst = pdbs_dir / src.name
-            shutil.copy2(src, dst)
-            return dst
+        if quiver_path is not None:
+            # --- Quiver mode: extract PDBs from .qv archive ---
+            reader = QuiverReader(str(quiver_path))
+            for tag in raw_lines:
+                out = pdbs_dir / f"{tag}.pdb"
+                reader.extract_to_file(reader.find(tag), str(out))
+            _write_progress(stage="extract", **_prog)
+            # Quiver structures are single-model, no ensemble splitting needed
+            expanded = sorted(pdbs_dir.glob("*.pdb"))
+        else:
+            # --- PDB file mode (original path) ---
+            inputs = [Path(line) for line in raw_lines]
 
-        max_copy_workers = min(16, len(inputs)) if inputs else 1
-        with ThreadPoolExecutor(max_workers=max_copy_workers) as ex:
-            list(ex.map(_copy_pdb, inputs))
-        _write_progress(stage="copy", **_prog)
+            # Stage PDBs to local (parallel I/O for network filesystems)
+            def _copy_pdb(src: Path) -> Path:
+                dst = pdbs_dir / src.name
+                shutil.copy2(src, dst)
+                return dst
 
-        staged = sorted(pdbs_dir.glob("*.pdb"))
+            max_copy_workers = min(16, len(inputs)) if inputs else 1
+            with ThreadPoolExecutor(max_workers=max_copy_workers) as ex:
+                list(ex.map(_copy_pdb, inputs))
+            _write_progress(stage="copy", **_prog)
 
-        # Expand only if ensemble
-        expanded: List[Path] = []
-        for p in staged:
-            expanded.extend(split_models_if_ensemble(p, local_root / "models" / p.stem))
+            staged = sorted(pdbs_dir.glob("*.pdb"))
+
+            # Expand only if ensemble
+            expanded = []
+            for p in staged:
+                expanded.extend(split_models_if_ensemble(p, local_root / "models" / p.stem))
+
         _prog["n_models"] = len(expanded)
         _write_progress(stage="expand", **_prog)
 
@@ -619,6 +699,7 @@ def run_stageA_one_shard(
             "shard_id": shard_id,
             "shard_list": str(shard_list),
             "shard_dir": str(shard_dir),
+            "quiver": str(quiver_path) if quiver_path else None,
             "chains": {"heavy": heavy, "light": light, "antigen": antigen, "antigen_chainid_for_graph": antigen_chainid_for_graph},
             "num_cores": num_cores,
             "do_cluster": bool(effective_do_cluster),
@@ -644,7 +725,10 @@ def run_stageA_one_shard(
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pdb-root", required=True, help="Folder of input PDBs (BeeGFS)")
+    inp = ap.add_mutually_exclusive_group(required=True)
+    inp.add_argument("--pdb-root", help="Folder of input PDBs (BeeGFS)")
+    inp.add_argument("--quiver", help="Path to .qv quiver archive (index inferred as .qv.idx)")
+
     ap.add_argument("--run-root", required=True, help="Run root (BeeGFS) e.g. .../deeprankab_run_015")
     ap.add_argument("--make-shards", action="store_true", help="Create shard lists then exit")
     ap.add_argument("--target-shard-gb", type=float, default=5.0)
@@ -669,20 +753,31 @@ def main() -> int:
         print("ERROR: use at most one of --prep-graphs-only or --cluster-only", file=os.sys.stderr)
         return 2
 
+    quiver_path = Path(args.quiver).resolve() if args.quiver else None
+
     run_root = Path(args.run_root).resolve()
     shard_lists_dir = safe_mkdir(run_root / "shard_lists")
     shards_dir = safe_mkdir(run_root / "shards")
 
     if args.make_shards:
-        out_lists = build_shard_lists(
-            pdb_root=Path(args.pdb_root).resolve(),
-            shard_lists_dir=shard_lists_dir,
-            target_gb=float(args.target_shard_gb),
-            max_per_shard=int(args.max_per_shard),
-            min_per_shard=int(args.min_per_shard),
-            glob_pat=str(args.glob),
-        )
-        print(f"✓ Wrote {len(out_lists)} shard lists in {shard_lists_dir}")
+        if quiver_path:
+            out_lists = build_shard_lists_quiver(
+                qv_path=quiver_path,
+                shard_lists_dir=shard_lists_dir,
+                target_gb=float(args.target_shard_gb),
+                max_per_shard=int(args.max_per_shard),
+                min_per_shard=int(args.min_per_shard),
+            )
+        else:
+            out_lists = build_shard_lists(
+                pdb_root=Path(args.pdb_root).resolve(),
+                shard_lists_dir=shard_lists_dir,
+                target_gb=float(args.target_shard_gb),
+                max_per_shard=int(args.max_per_shard),
+                min_per_shard=int(args.min_per_shard),
+                glob_pat=str(args.glob),
+            )
+        print(f"Wrote {len(out_lists)} shard lists in {shard_lists_dir}")
         return 0
 
     if not args.shard_id:
@@ -714,10 +809,11 @@ def main() -> int:
             do_cluster=(not args.no_cluster),
             publish_stagea_done=(not args.prep_graphs_only),
             stagea_phase=("prep_graphs" if args.prep_graphs_only else "full"),
+            quiver_path=quiver_path,
         )
     gb = res.graphs_bytes / (1024**3)
     phase = "cluster_only" if args.cluster_only else ("prep_graphs" if args.prep_graphs_only else "full")
-    print(f"✓ StageA[{phase}] shard_{res.shard_id}: graphs={gb:.2f} GB ok={res.n_ok} fail={res.n_fail}")
+    print(f"StageA[{phase}] shard_{res.shard_id}: graphs={gb:.2f} GB ok={res.n_ok} fail={res.n_fail}")
     return 0
 
 if __name__ == "__main__":
