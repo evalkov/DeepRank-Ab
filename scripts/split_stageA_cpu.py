@@ -574,6 +574,7 @@ def run_stageA_one_shard(
 
         if quiver_path is not None:
             # --- Quiver mode: extract PDBs from .qv archive ---
+            inputs = raw_lines
             reader = QuiverReader(str(quiver_path))
             for tag in raw_lines:
                 out = pdbs_dir / f"{tag}.pdb"
